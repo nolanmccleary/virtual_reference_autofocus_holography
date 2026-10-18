@@ -48,6 +48,16 @@ class CrossScene:
     # --- reference antenna (homodyne denominator) ---
     reference_xy: tuple[float, float] | None = None
 
+    # --- multipath (simple first-order box of image sources) ---
+    # Walls sit metres beyond the scene so reflected path lengths differ from the
+    # direct path by more than the coherence length c/Δf (~4.3 m at 70 MHz) --
+    # that long-path decorrelation is what lets white-light suppress the speckle.
+    multipath: bool = False
+    multipath_reflectivity: float = 0.5   # per-wall reflected amplitude (tuned)
+    room_margin_m: float = 2.5            # side walls this far beyond the scan plane
+    room_back_m: float = 2.5              # back wall this far behind the emitter
+    room_front_m: float = 2.5             # front wall this far behind the recorder
+
     def __post_init__(self) -> None:
         cx, cy = self.Lx / 2.0, self.Ly / 2.0
         if self.emitter_xy is None:

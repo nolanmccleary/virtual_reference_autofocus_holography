@@ -20,7 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from .forward import record_hologram, reference_value  # noqa: E402
+from .forward import record_hologram, reference_value, _image_sources  # noqa: E402
 from .propagation import angular_spectrum_propagate  # noqa: E402
 from .scene import CrossScene  # noqa: E402
 from .sources import speed_of_light, wavelength_of  # noqa: E402
@@ -46,6 +46,9 @@ class Params:
     cross_y_cm: float = 100.0
     ref_x_cm: float = 45.0
     ref_y_cm: float = 30.0
+    multipath: bool = False
+    wall_distance_m: float = 2.5     # walls this far beyond the scene (all sides)
+    reflectivity: float = 0.5        # per-wall reflected amplitude (0 == multipath off)
     n_depths: int = 41
 
     def scene(self) -> CrossScene:
@@ -62,6 +65,11 @@ class Params:
             emitter_xy=(self.emitter_x_cm / 100.0, self.emitter_y_cm / 100.0),
             cross_center_xy=(self.cross_x_cm / 100.0, self.cross_y_cm / 100.0),
             reference_xy=(self.ref_x_cm / 100.0, self.ref_y_cm / 100.0),
+            multipath=bool(self.multipath),
+            multipath_reflectivity=float(self.reflectivity),
+            room_margin_m=float(self.wall_distance_m),
+            room_back_m=float(self.wall_distance_m),
+            room_front_m=float(self.wall_distance_m),
         )
 
 
@@ -254,7 +262,15 @@ class HoloEngine:
                 "emitter_x_cm": self.p.emitter_x_cm, "emitter_y_cm": self.p.emitter_y_cm,
                 "cross_x_cm": self.p.cross_x_cm, "cross_y_cm": self.p.cross_y_cm,
                 "ref_x_cm": self.p.ref_x_cm, "ref_y_cm": self.p.ref_y_cm,
+                "multipath": self.p.multipath,
+                "wall_distance_m": self.p.wall_distance_m, "reflectivity": self.p.reflectivity,
             },
             "lambdaCm": wavelength_of(s.carrier_hz) * 100.0,
             "cLight": speed_of_light,
+            "room": {
+                "x0": -s.room_margin_m, "x1": s.Lx + s.room_margin_m,
+                "y0": -s.room_margin_m, "y1": s.Ly + s.room_margin_m,
+                "zFront": -s.room_front_m, "zBack": s.z_emitter + s.room_back_m,
+            },
+            "imageSources": [list(p) for p, _ in _image_sources(s)],
         }

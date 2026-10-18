@@ -20,32 +20,67 @@ from .scene import CrossScene
 from .sources import point_source_field, wavelength_of
 
 
-def record_hologram(scene: CrossScene, frequency_hz: float) -> np.ndarray:
-    """Complex field recorded on the scan plane (z=0) for one frequency.
+def _direct_field(scene: CrossScene, source_xyz, wavelength: float) -> np.ndarray:
+    """Field at the recorder from a source, through the (finite-thickness) object.
 
-    A finite-thickness cross is modelled as a short stack of thin absorbing
-    masks spanning [z_object - T/2, z_object + T/2]; the wave is propagated
-    slice-to-slice through them. Thickness 0 reduces to a single thin mask.
+    A finite-thickness cross is modelled as a short stack of thin absorbing masks
+    spanning [z_object - T/2, z_object + T/2]; thickness 0 reduces to one mask.
     """
-    wavelength = wavelength_of(frequency_hz)
     X, Y = scene.grids()
     mask = scene.cross_mask()
     T = scene.cross_thickness
-
     if T <= 0:
         planes = [scene.z_object]
     else:
         n = int(np.clip(round(T / 0.05) + 1, 2, 6))
         planes = list(np.linspace(scene.z_object + T / 2.0, scene.z_object - T / 2.0, n))
 
-    # launch the spherical wave onto the first (farthest) object slice
-    u = point_source_field(X, Y, planes[0], scene.emitter_xyz, wavelength)
+    u = point_source_field(X, Y, planes[0], source_xyz, wavelength)
     for i, zp in enumerate(planes):
-        u = u * mask                                   # absorb at this slice
+        u = u * mask
         next_z = planes[i + 1] if i + 1 < len(planes) else 0.0
         u = angular_spectrum_propagate(
-            u, dz=(zp - next_z), wavelength=wavelength, dx=scene.dx, dy=scene.dy
-        )
+            u, dz=(zp - next_z), wavelength=wavelength, dx=scene.dx, dy=scene.dy)
+    return u
+
+
+def _image_sources(scene: CrossScene):
+    """First-order image sources of the emitter across a simple box room.
+
+    Six walls: x=0, x=Lx, y=0, y=Ly (scan-region edges), plus a back wall behind
+    the emitter and a front wall behind the recorder. Each contributes one bounce
+    at the reflectivity amplitude. (Higher-order bounces: a possible future option.)
+    """
+    ex, ey, ez = scene.emitter_xyz
+    Lx, Ly = scene.Lx, scene.Ly
+    m = scene.room_margin_m
+    x0, x1 = -m, Lx + m          # side walls, metres beyond the scan plane
+    y0, y1 = -m, Ly + m
+    zb = scene.z_emitter + scene.room_back_m
+    zf = -scene.room_front_m
+    r = scene.multipath_reflectivity
+    return [
+        ((2 * x0 - ex, ey, ez), r),
+        ((2 * x1 - ex, ey, ez), r),
+        ((ex, 2 * y0 - ey, ez), r),
+        ((ex, 2 * y1 - ey, ez), r),
+        ((ex, ey, 2 * zb - ez), r),
+        ((ex, ey, 2 * zf - ez), r),
+    ]
+
+
+def record_hologram(scene: CrossScene, frequency_hz: float) -> np.ndarray:
+    """Complex field recorded on the scan plane (z=0) for one frequency.
+
+    Direct wave (through the object) plus, when multipath is enabled, unstructured
+    reflected waves from wall image sources -> standing waves / speckle.
+    """
+    wavelength = wavelength_of(frequency_hz)
+    u = _direct_field(scene, scene.emitter_xyz, wavelength)
+    if scene.multipath:
+        X, Y = scene.grids()
+        for pos, amp in _image_sources(scene):
+            u = u + amp * point_source_field(X, Y, 0.0, pos, wavelength)
     return u
 
 

@@ -128,6 +128,9 @@
     <div class="row"><span class="name">Scan time</span><span class="val" id="speedVal">8.0 s</span></div>
     <input type="range" id="speed" min="2" max="30" value="8" step="0.5">
   </div>
+  <label class="toggle" style="margin-top:10px"><input type="checkbox" id="multipath"><span class="box"></span>Multipath (wall reflections)</label>
+  <div class="ctl"><div class="row"><span class="name">Wall distance</span><span class="val" id="wallVal">2.5 m</span></div><input type="range" id="wall" min="0.5" max="6.0" value="2.5" step="0.1"></div>
+  <div class="ctl"><div class="row"><span class="name">Reflectivity</span><span class="val" id="reflVal">0.50</span></div><input type="range" id="refl" min="0.0" max="1.0" value="0.5" step="0.05"></div>
 
   <h2 class="mt">Parameters</h2>
   <div class="ctl"><div class="row"><span class="name">Carrier</span><span class="val" id="carrierVal">5.0 GHz</span></div><input type="range" id="carrier" min="2.0" max="6.0" value="5.0" step="0.1"></div>
@@ -306,17 +309,20 @@
     if(st.params){ const map={carrier_ghz:"carrier",bandwidth_mhz:"band",n_freq:"nfreq",nx:"nx",
       plane_x_m:"planex",plane_y_m:"planey",point_sep_cm:"sep",
       z_emitter_cm:"zem",z_object_cm:"zob",cross_arm_cm:"arm",cross_thickness_cm:"thk",
-      emitter_x_cm:"emx",emitter_y_cm:"emy",cross_x_cm:"cx",cross_y_cm:"cy",ref_x_cm:"rx",ref_y_cm:"ry"};
-      for(const kk in map){ const el=R[map[kk]]; if(el){ el.value=st.params[kk]; liveLabel(map[kk]); } } }
+      emitter_x_cm:"emx",emitter_y_cm:"emy",cross_x_cm:"cx",cross_y_cm:"cy",ref_x_cm:"rx",ref_y_cm:"ry",
+      wall_distance_m:"wall",reflectivity:"refl"};
+      for(const kk in map){ const el=R[map[kk]]; if(el){ el.value=st.params[kk]; liveLabel(map[kk]); } }
+      document.getElementById("multipath").checked = !!st.params.multipath; }
   }
 
   // ---------- parameter controls ----------
   const cm = v=>v+" cm";
   const fmt = { carrier:v=>v.toFixed(1)+" GHz", band:v=>v+" MHz", nfreq:v=>""+v, nx:v=>v+" px",
     planex:v=>v.toFixed(1)+" m", planey:v=>v.toFixed(1)+" m", sep:v=>v+" cm",
+    wall:v=>v.toFixed(1)+" m", refl:v=>(+v).toFixed(2),
     emx:cm, emy:cm, zem:cm, cx:cm, cy:cm, zob:cm, arm:cm, thk:cm, rx:cm, ry:cm };
   const valEls = { carrier:"carrierVal", band:"bandVal", nfreq:"nfreqVal", nx:"nxVal",
-    planex:"planexVal", planey:"planeyVal", sep:"sepVal",
+    planex:"planexVal", planey:"planeyVal", sep:"sepVal", wall:"wallVal", refl:"reflVal",
     emx:"emxVal", emy:"emyVal", zem:"zemVal", cx:"cxVal", cy:"cyVal", zob:"zobVal",
     arm:"armVal", thk:"thkVal", rx:"rxVal", ry:"ryVal" };
   const PARAM_IDS = Object.keys(valEls);
@@ -328,7 +334,9 @@
       plane_x_m:+R.planex.value, plane_y_m:+R.planey.value, point_sep_cm:+R.sep.value,
       z_emitter_cm:+R.zem.value, z_object_cm:+R.zob.value, cross_arm_cm:+R.arm.value, cross_thickness_cm:+R.thk.value,
       emitter_x_cm:+R.emx.value, emitter_y_cm:+R.emy.value,
-      cross_x_cm:+R.cx.value, cross_y_cm:+R.cy.value, ref_x_cm:+R.rx.value, ref_y_cm:+R.ry.value
+      cross_x_cm:+R.cx.value, cross_y_cm:+R.cy.value, ref_x_cm:+R.rx.value, ref_y_cm:+R.ry.value,
+      multipath: document.getElementById("multipath").checked,
+      wall_distance_m:+R.wall.value, reflectivity:+R.refl.value
     };
   }
   function postParams(){
@@ -344,8 +352,11 @@
   PARAM_IDS.forEach(id=>{
     R[id].addEventListener("input", ()=>{ liveLabel(id); clearTimeout(paramTimer); paramTimer=setTimeout(postParams,260); });
   });
-  // lock parameter + position + speed sliders while a scan is running
-  function setParamLock(dis){ PARAM_IDS.forEach(id=>R[id].disabled=dis); document.getElementById("speed").disabled=dis; }
+  // multipath toggle (not a slider) -> recompute when flipped
+  document.getElementById("multipath").addEventListener("change", ()=>{ if(!scanning){ clearTimeout(paramTimer); paramTimer=setTimeout(postParams,60); } });
+  // lock parameter + position + speed + multipath while a scan is running
+  function setParamLock(dis){ PARAM_IDS.forEach(id=>R[id].disabled=dis);
+    document.getElementById("speed").disabled=dis; document.getElementById("multipath").disabled=dis; }
 
   // ---------- mode + depth ----------
   function setMode(m){ mode=m;
@@ -467,6 +478,20 @@
     if(opt.recon){ const mc={single:"56,225,214",white:"255,181,69",dark:"255,93,158"}[mode];
       pit.push({d:dot3(sub([Lx/2,Ly/2,reconZ],eye),fwd), fn:()=>{ poly([[0,0,reconZ],[Lx,0,reconZ],[Lx,Ly,reconZ],[0,Ly,reconZ]],`rgba(${mc},0.10)`,`rgba(${mc},0.9)`,1.6);
         lbl([0,Ly,reconZ],"recon z="+reconZ.toFixed(2),`rgb(${mc})`,6,-6); }}); }
+    // multipath room walls (where the image-source model places them)
+    const mpOn = S.params && S.params.multipath;
+    if(mpOn && S.room){ const Rm=S.room;
+      const walls=[
+        [[Rm.x0,Rm.y0,Rm.zFront],[Rm.x0,Rm.y1,Rm.zFront],[Rm.x0,Rm.y1,Rm.zBack],[Rm.x0,Rm.y0,Rm.zBack]],
+        [[Rm.x1,Rm.y0,Rm.zFront],[Rm.x1,Rm.y1,Rm.zFront],[Rm.x1,Rm.y1,Rm.zBack],[Rm.x1,Rm.y0,Rm.zBack]],
+        [[Rm.x0,Rm.y0,Rm.zFront],[Rm.x1,Rm.y0,Rm.zFront],[Rm.x1,Rm.y0,Rm.zBack],[Rm.x0,Rm.y0,Rm.zBack]],
+        [[Rm.x0,Rm.y1,Rm.zFront],[Rm.x1,Rm.y1,Rm.zFront],[Rm.x1,Rm.y1,Rm.zBack],[Rm.x0,Rm.y1,Rm.zBack]],
+        [[Rm.x0,Rm.y0,Rm.zBack],[Rm.x1,Rm.y0,Rm.zBack],[Rm.x1,Rm.y1,Rm.zBack],[Rm.x0,Rm.y1,Rm.zBack]],
+        [[Rm.x0,Rm.y0,Rm.zFront],[Rm.x1,Rm.y0,Rm.zFront],[Rm.x1,Rm.y1,Rm.zFront],[Rm.x0,Rm.y1,Rm.zFront]],
+      ];
+      walls.forEach(q=>{ const c=[0,0,0]; q.forEach(p=>{c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];}); c[0]/=4;c[1]/=4;c[2]/=4;
+        pit.push({d:dot3(sub(c,eye),fwd), fn:()=>poly(q,"rgba(120,140,170,0.045)","rgba(130,155,195,0.30)",1)}); });
+    }
     pit.sort((a,b)=>b.d-a.d).forEach(it=>it.fn());
 
     if(opt.cone) [[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]].forEach(c=>seg(EM,c,"rgba(255,181,69,0.26)",1,1));

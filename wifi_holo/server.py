@@ -132,6 +132,9 @@ class Handler(BaseHTTPRequestHandler):
                 cross_y_cm=float(g("cross_y_cm", cur.cross_y_cm)),
                 ref_x_cm=float(g("ref_x_cm", cur.ref_x_cm)),
                 ref_y_cm=float(g("ref_y_cm", cur.ref_y_cm)),
+                multipath=bool(g("multipath", cur.multipath)),
+                wall_distance_m=float(g("wall_distance_m", cur.wall_distance_m)),
+                reflectivity=float(g("reflectivity", cur.reflectivity)),
             )
             _engine.set_params(p)
             self._send_json(_engine.state())
