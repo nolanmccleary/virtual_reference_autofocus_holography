@@ -25,15 +25,16 @@ from .propagation import angular_spectrum_propagate  # noqa: E402
 from .scene import CrossScene  # noqa: E402
 from .sources import speed_of_light, wavelength_of  # noqa: E402
 
-LX, LY = 3.0, 2.0  # recording plane size is fixed (m)
-
-
 @dataclass
 class Params:
     carrier_ghz: float = 5.0
     bandwidth_mhz: float = 70.0
     n_freq: int = 32
-    nx: int = 120              # scan-plane columns (resolution); ny derived
+    # plane extent (m) and the two separate grids over it
+    plane_x_m: float = 3.0
+    plane_y_m: float = 2.0
+    nx: int = 120              # SLICE RESOLUTION: fine compute/display columns; ny derived
+    point_sep_cm: float = 2.5  # SCAN GRID: measurement-point separation (both axes)
     z_emitter_cm: float = 230.0
     z_object_cm: float = 140.0
     cross_arm_cm: float = 100.0   # full arm span
@@ -48,9 +49,9 @@ class Params:
     n_depths: int = 41
 
     def scene(self) -> CrossScene:
-        dx = LX / self.nx
+        dx = self.plane_x_m / self.nx
         return CrossScene(
-            Lx=LX, Ly=LY, dx=dx,
+            Lx=self.plane_x_m, Ly=self.plane_y_m, dx=dx,
             z_object=self.z_object_cm / 100.0,
             z_emitter=self.z_emitter_cm / 100.0,
             carrier_hz=self.carrier_ghz * 1e9,
@@ -79,17 +80,42 @@ class HoloEngine:
         self.p = params
         self.scene = params.scene()
         s = self.scene
-        self.nx, self.ny = s.nx, s.ny
-        self.total = self.nx * self.ny
+        self.nx, self.ny = s.nx, s.ny           # fine compute grid (slice resolution)
         self.freqs = s.frequencies()
         self.carrier_idx = int(np.argmin(np.abs(self.freqs - s.carrier_hz)))
         self.z_values = np.linspace(0.4, s.z_emitter + 0.3, params.n_depths)
         self.i_object = int(np.argmin(np.abs(self.z_values - s.z_object)))
         self.i_emitter = int(np.argmin(np.abs(self.z_values - s.z_emitter)))
 
-        # cache the full complex hologram + reference for every frequency
-        self.U = [record_hologram(s, f) for f in self.freqs]
-        self.ref = [reference_value(s, f) or 1.0 for f in self.freqs]
+        # ---- scan grid (measurement points) at the requested separation ----
+        sep = max(params.point_sep_cm / 100.0, s.dx)      # not finer than the compute grid
+        self.nx_pts = max(1, int(round(s.Lx / sep)))
+        self.ny_pts = max(1, int(round(s.Ly / sep)))
+        self.scan_total = self.nx_pts * self.ny_pts
+        self.total = self.scan_total                       # progressive-scan count
+        self.sep_x_cm = s.Lx / self.nx_pts * 100.0
+        self.sep_y_cm = s.Ly / self.ny_pts * 100.0
+
+        # map fine pixels <-> scan points (nearest), for block-fill sampling
+        dx, dy = s.dx, s.dy
+        xs = (np.arange(self.nx_pts) + 0.5) * s.Lx / self.nx_pts
+        ys = (np.arange(self.ny_pts) + 0.5) * s.Ly / self.ny_pts
+        scanpix_col = np.clip(np.round(xs / dx - 0.5).astype(int), 0, self.nx - 1)
+        scanpix_row = np.clip(np.round(ys / dy - 0.5).astype(int), 0, self.ny - 1)
+        fine_x = (np.arange(self.nx) + 0.5) * dx
+        fine_y = (np.arange(self.ny) + 0.5) * dy
+        owner_col = np.clip(np.round(fine_x / (s.Lx / self.nx_pts) - 0.5).astype(int), 0, self.nx_pts - 1)
+        owner_row = np.clip(np.round(fine_y / (s.Ly / self.ny_pts) - 0.5).astype(int), 0, self.ny_pts - 1)
+        self._srow = scanpix_row[owner_row]               # fine row -> sampled fine row
+        self._scol = scanpix_col[owner_col]               # fine col -> sampled fine col
+        self.owner_index = owner_row[:, None] * self.nx_pts + owner_col[None, :]  # (ny,nx)
+
+        # cache full field (for reference) + block-filled measured field per frequency
+        Ufull = [record_hologram(s, f) for f in self.freqs]
+        rx = int(np.clip(round(s.reference_xy[0] / dx - 0.5), 0, self.nx - 1))
+        ry = int(np.clip(round(s.reference_xy[1] / dy - 0.5), 0, self.ny - 1))
+        self.ref = [complex(u[ry, rx]) or 1.0 for u in Ufull]
+        self.U = [u[np.ix_(self._srow, self._scol)] for u in Ufull]   # block-filled samples
 
         # emitter-plane Gaussian mask for dark-field
         X, Y = s.grids()
@@ -99,8 +125,9 @@ class HoloEngine:
 
     # -------------------------------------------------------------- aperture
     def _aperture(self, k: int) -> np.ndarray:
-        k = int(np.clip(k, 0, self.total))
-        return (np.arange(self.total) < k).reshape(self.ny, self.nx).astype(float)
+        """Fine-grid mask of scan points acquired so far (first k in raster order)."""
+        k = int(np.clip(k, 0, self.scan_total))
+        return (self.owner_index < k).astype(float)
 
     def _bp(self, holo: np.ndarray, z: float, wl: float) -> np.ndarray:
         return angular_spectrum_propagate(holo, dz=-z, wavelength=wl, dx=self.scene.dx, dy=self.scene.dy)
@@ -207,7 +234,9 @@ class HoloEngine:
         s = self.scene
         return {
             "nx": self.nx, "ny": self.ny, "total": self.total,
-            "Lx": LX, "Ly": LY, "dx": s.dx,
+            "Lx": s.Lx, "Ly": s.Ly, "dx": s.dx,
+            "nxPts": self.nx_pts, "nyPts": self.ny_pts, "scanTotal": self.scan_total,
+            "sepXcm": self.sep_x_cm, "sepYcm": self.sep_y_cm,
             "z": self.z_values.tolist(),
             "iObject": self.i_object, "iEmitter": self.i_emitter,
             "zObject": s.z_object, "zEmitter": s.z_emitter,
@@ -218,6 +247,8 @@ class HoloEngine:
             "params": {
                 "carrier_ghz": self.p.carrier_ghz, "bandwidth_mhz": self.p.bandwidth_mhz,
                 "n_freq": self.p.n_freq, "nx": self.p.nx,
+                "plane_x_m": self.p.plane_x_m, "plane_y_m": self.p.plane_y_m,
+                "point_sep_cm": self.p.point_sep_cm,
                 "z_emitter_cm": self.p.z_emitter_cm, "z_object_cm": self.p.z_object_cm,
                 "cross_arm_cm": self.p.cross_arm_cm, "cross_thickness_cm": self.p.cross_thickness_cm,
                 "emitter_x_cm": self.p.emitter_x_cm, "emitter_y_cm": self.p.emitter_y_cm,

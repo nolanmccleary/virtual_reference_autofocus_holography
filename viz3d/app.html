@@ -133,13 +133,18 @@
   <div class="ctl"><div class="row"><span class="name">Carrier</span><span class="val" id="carrierVal">5.0 GHz</span></div><input type="range" id="carrier" min="2.0" max="6.0" value="5.0" step="0.1"></div>
   <div class="ctl"><div class="row"><span class="name">Bandwidth</span><span class="val" id="bandVal">70 MHz</span></div><input type="range" id="band" min="0" max="200" value="70" step="5"></div>
   <div class="ctl"><div class="row"><span class="name">Freq. samples</span><span class="val" id="nfreqVal">32</span></div><input type="range" id="nfreq" min="1" max="48" value="32" step="1"></div>
-  <div class="ctl"><div class="row"><span class="name">Scan grid</span><span class="val" id="nxVal">120 px</span></div><input type="range" id="nx" min="48" max="176" value="120" step="4"></div>
+  <div class="ctl"><div class="row"><span class="name">Slice resolution</span><span class="val" id="nxVal">120 px</span></div><input type="range" id="nx" min="48" max="200" value="120" step="4"></div>
+  <div class="ctl"><div class="row"><span class="name">Plane X</span><span class="val" id="planexVal">3.0 m</span></div><input type="range" id="planex" min="1.0" max="4.0" value="3.0" step="0.1"></div>
+  <div class="ctl"><div class="row"><span class="name">Plane Y</span><span class="val" id="planeyVal">2.0 m</span></div><input type="range" id="planey" min="1.0" max="4.0" value="2.0" step="0.1"></div>
+  <div class="ctl"><div class="row"><span class="name">Point separation</span><span class="val" id="sepVal">2.5 cm</span></div><input type="range" id="sep" min="1" max="40" value="2.5" step="0.5"></div>
   <div class="lam">&lambda; = <b id="lamVal">6.0 cm</b> &nbsp;·&nbsp; derived from carrier</div>
+  <div class="lam">scan grid: <b id="ptsVal">120 × 80 = 9600</b> pts</div>
 
   <h2 class="mt">Show</h2>
   <label class="toggle"><input type="checkbox" id="t-recon" checked><span class="box"></span>Reconstruction plane</label>
   <label class="toggle"><input type="checkbox" id="t-cone" checked><span class="box"></span>Illumination cone</label>
   <label class="toggle"><input type="checkbox" id="t-rays"><span class="box"></span>Shadow rays</label>
+  <label class="toggle"><input type="checkbox" id="t-mesh"><span class="box"></span>Scan mesh</label>
   <label class="toggle"><input type="checkbox" id="t-grid" checked><span class="box"></span>Scan grid</label>
   <label class="toggle"><input type="checkbox" id="t-spin" checked><span class="box"></span>Auto-rotate</label>
 </div>
@@ -291,9 +296,15 @@
       const s=document.createElement("span"); s.textContent=txt; s.style.left=(bi/(S.z.length-1)*100)+"%"; ticks.appendChild(s); };
     addTick(S.z[0],S.z[0].toFixed(1)); addTick(S.zObject,"obj"); addTick(S.zEmitter,"emit"); addTick(S.z[S.z.length-1],S.z[S.z.length-1].toFixed(1));
     document.getElementById("lamVal").textContent = S.lambdaCm.toFixed(1)+" cm";
+    document.getElementById("ptsVal").textContent = S.nxPts+" × "+S.nyPts+" = "+S.scanTotal;
     document.getElementById("depth").value = zIndex;
+    // position slider ranges track the plane size
+    const xmax=Math.round(S.Lx*100), ymax=Math.round(S.Ly*100);
+    ["emx","cx","rx"].forEach(id=>R[id].max=xmax);
+    ["emy","cy","ry"].forEach(id=>R[id].max=ymax);
     // reflect server params back into the sliders
     if(st.params){ const map={carrier_ghz:"carrier",bandwidth_mhz:"band",n_freq:"nfreq",nx:"nx",
+      plane_x_m:"planex",plane_y_m:"planey",point_sep_cm:"sep",
       z_emitter_cm:"zem",z_object_cm:"zob",cross_arm_cm:"arm",cross_thickness_cm:"thk",
       emitter_x_cm:"emx",emitter_y_cm:"emy",cross_x_cm:"cx",cross_y_cm:"cy",ref_x_cm:"rx",ref_y_cm:"ry"};
       for(const kk in map){ const el=R[map[kk]]; if(el){ el.value=st.params[kk]; liveLabel(map[kk]); } } }
@@ -302,8 +313,10 @@
   // ---------- parameter controls ----------
   const cm = v=>v+" cm";
   const fmt = { carrier:v=>v.toFixed(1)+" GHz", band:v=>v+" MHz", nfreq:v=>""+v, nx:v=>v+" px",
+    planex:v=>v.toFixed(1)+" m", planey:v=>v.toFixed(1)+" m", sep:v=>v+" cm",
     emx:cm, emy:cm, zem:cm, cx:cm, cy:cm, zob:cm, arm:cm, thk:cm, rx:cm, ry:cm };
   const valEls = { carrier:"carrierVal", band:"bandVal", nfreq:"nfreqVal", nx:"nxVal",
+    planex:"planexVal", planey:"planeyVal", sep:"sepVal",
     emx:"emxVal", emy:"emyVal", zem:"zemVal", cx:"cxVal", cy:"cyVal", zob:"zobVal",
     arm:"armVal", thk:"thkVal", rx:"rxVal", ry:"ryVal" };
   const PARAM_IDS = Object.keys(valEls);
@@ -312,6 +325,7 @@
   function readParams(){
     return {
       carrier_ghz:+R.carrier.value, bandwidth_mhz:+R.band.value, n_freq:+R.nfreq.value, nx:+R.nx.value,
+      plane_x_m:+R.planex.value, plane_y_m:+R.planey.value, point_sep_cm:+R.sep.value,
       z_emitter_cm:+R.zem.value, z_object_cm:+R.zob.value, cross_arm_cm:+R.arm.value, cross_thickness_cm:+R.thk.value,
       emitter_x_cm:+R.emx.value, emitter_y_cm:+R.emy.value,
       cross_x_cm:+R.cx.value, cross_y_cm:+R.cy.value, ref_x_cm:+R.rx.value, ref_y_cm:+R.ry.value
@@ -394,9 +408,22 @@
     faces.sort((a,b2)=>b2.d-a.d);
     faces.forEach(fc=>poly(fc.v, fc.col, "rgba(197,206,221,0.45)", 1));
   }
+  function drawScanMesh(Lx,Ly,zTop,sx,sy){
+    // cube lattice filling the prism between scan plane (z=0) and router (z=zTop);
+    // vertices are the points p. Decimated per axis so it stays legible/fast.
+    const sz=(sx+sy)/2;
+    const nX=Math.max(1,Math.round(Lx/sx)), nY=Math.max(1,Math.round(Ly/sy)), nZ=Math.max(1,Math.round(zTop/sz));
+    const line=(a,b)=>Array.from({length:a+1},(_,i)=>i).filter(i=>i%Math.ceil((a)/b||1)===0||i===a);
+    const xs=line(nX,9).map(i=>i/nX*Lx), ys=line(nY,7).map(j=>j/nY*Ly), zs=line(nZ,11).map(m=>m/nZ*zTop);
+    const lc="rgba(120,180,210,0.20)";
+    ys.forEach(y=>zs.forEach(z=>seg([0,y,z],[Lx,y,z],lc,1,1)));
+    xs.forEach(x=>zs.forEach(z=>seg([x,0,z],[x,Ly,z],lc,1,1)));
+    xs.forEach(x=>ys.forEach(y=>seg([x,y,0],[x,y,zTop],lc,1,1)));
+    xs.forEach(x=>ys.forEach(y=>zs.forEach(z=>{ const p=proj([x,y,z]); if(p){ ctx.fillStyle="rgba(150,210,235,0.55)"; ctx.beginPath(); ctx.arc(p.x,p.y,1.3,0,7); ctx.fill(); } })));
+  }
 
-  const opt={recon:true,cone:true,rays:false,grid:true,spin:true};
-  [["t-recon","recon"],["t-cone","cone"],["t-rays","rays"],["t-grid","grid"],["t-spin","spin"]].forEach(([id,key])=>{
+  const opt={recon:true,cone:true,rays:false,mesh:false,grid:true,spin:true};
+  [["t-recon","recon"],["t-cone","cone"],["t-rays","rays"],["t-mesh","mesh"],["t-grid","grid"],["t-spin","spin"]].forEach(([id,key])=>{
     document.getElementById(id).addEventListener("change",e=>opt[key]=e.target.checked); });
 
   let dragging=false,lx=0,ly=0;
@@ -407,7 +434,6 @@
   function resize(){ const dpr=Math.min(devicePixelRatio||1,2); W=canvas.clientWidth; H=canvas.clientHeight; canvas.width=W*dpr; canvas.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); drawProfile(); }
   addEventListener("resize",resize);
 
-  const gx=24, gy=16; // subsampled grid dots
   function frame(now){
     if(opt.spin&&!reduceMotion) az+=0.0032;
     cam(); ctx.clearRect(0,0,W,H);
@@ -424,9 +450,12 @@
       if(now-lastReq>110){ lastReq=now; schedule("recon",true); }
       if(p>=1){ scanning=false; k=S.total; scanBtn.textContent="Begin scan"; scanBtn.classList.remove("stop"); setParamLock(false); updateScanText(); schedule("recon",true); }
     }
-    const frac = S.total? k/S.total : 0;
-    const row = Math.floor(frac*S.ny), col = Math.floor(frac*S.total) - row*S.nx;
-    const boundaryY = (row/S.ny)*Ly;
+    // scan progress over the scan grid (nxPts × nyPts measurement points)
+    const nxp=S.nxPts, nyp=S.nyPts, stot=S.scanTotal;
+    const frac = stot? k/stot : 0;
+    const srow = Math.min(nyp-1, Math.floor(frac*nyp));
+    const scol = Math.floor(frac*stot) - srow*nxp;
+    const boundaryY = (srow/nyp)*Ly;
 
     // planes far->near
     const pit=[];
@@ -441,21 +470,24 @@
     pit.sort((a,b)=>b.d-a.d).forEach(it=>it.fn());
 
     if(opt.cone) [[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]].forEach(c=>seg(EM,c,"rgba(255,181,69,0.26)",1,1));
-    if(opt.rays){ const f=(zEmit-zObj)/zEmit;
-      for(let y=0.2;y<Ly;y+=0.28)for(let x=0.2;x<Lx;x+=0.28){ const hx=EM[0]+(x-EM[0])*f,hy=EM[1]+(y-EM[1])*f;
+    if(opt.mesh) drawScanMesh(Lx,Ly,zEmit,S.sepXcm/100,S.sepYcm/100);
+    if(opt.rays){ const f=(zEmit-zObj)/zEmit; const sx=Math.ceil(nxp/22), sy=Math.ceil(nyp/16);
+      for(let iy=0;iy<nyp;iy+=sy)for(let ix=0;ix<nxp;ix+=sx){ const x=(ix+0.5)/nxp*Lx, y=(iy+0.5)/nyp*Ly;
+        const hx=EM[0]+(x-EM[0])*f,hy=EM[1]+(y-EM[1])*f;
         const blk=inCross(hx,hy,cc[0],cc[1],L,w); seg(EM,[x,y,0],blk?"rgba(255,93,94,0.5)":"rgba(56,225,214,0.12)",blk?1.3:0.8,1); } }
 
     const items=[];
-    if(opt.grid){ for(let iy=0;iy<gy;iy++)for(let ix=0;ix<gx;ix++){ const X=(ix+0.5)/gx*Lx, Y=(iy+0.5)/gy*Ly; const p=proj([X,Y,0]); if(!p)continue;
-      const acq = scanning ? (Y<=boundaryY) : (k>=S.total);
-      items.push({d:p.depth, fn:()=>{ const r=Math.max(1.2,9/p.depth);
-        ctx.fillStyle = acq ? "rgba(90,216,232,0.95)" : "rgba(70,90,110,0.5)";
-        if(acq){ctx.shadowColor="rgba(56,225,214,0.8)"; ctx.shadowBlur=5;}
-        ctx.beginPath(); ctx.arc(p.x,p.y,r,0,7); ctx.fill(); ctx.shadowBlur=0; }}); } }
+    if(opt.grid){ const sx=Math.ceil(nxp/40), sy=Math.ceil(nyp/28);
+      for(let iy=0;iy<nyp;iy+=sy)for(let ix=0;ix<nxp;ix+=sx){ const X=(ix+0.5)/nxp*Lx, Y=(iy+0.5)/nyp*Ly; const p=proj([X,Y,0]); if(!p)continue;
+        const acq = scanning ? (Y<=boundaryY) : (k>=stot);
+        items.push({d:p.depth, fn:()=>{ const r=Math.max(1.1,8/p.depth);
+          ctx.fillStyle = acq ? "rgba(90,216,232,0.95)" : "rgba(70,90,110,0.5)";
+          if(acq){ctx.shadowColor="rgba(56,225,214,0.8)"; ctx.shadowBlur=4;}
+          ctx.beginPath(); ctx.arc(p.x,p.y,r,0,7); ctx.fill(); ctx.shadowBlur=0; }}); } }
 
     // scanning antenna at current acquisition point
-    if(scanning || (k>0 && k<S.total)){
-      const ax=(col+0.5)/S.nx*Lx, ay=(row+0.5)/S.ny*Ly; const p=proj([ax,ay,0]);
+    if(scanning || (k>0 && k<stot)){
+      const ax=(scol+0.5)/nxp*Lx, ay=(srow+0.5)/nyp*Ly; const p=proj([ax,ay,0]);
       if(p) items.push({d:p.depth-0.001, fn:()=>{ const halo=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,15);
         halo.addColorStop(0,"rgba(234,242,255,0.9)"); halo.addColorStop(1,"rgba(234,242,255,0)");
         ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(p.x,p.y,15,0,7); ctx.fill();
