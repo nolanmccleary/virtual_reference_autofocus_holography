@@ -168,6 +168,7 @@
   <input type="range" id="depth" min="0" max="40" value="20" step="1">
   <div class="ticks" id="ticks"></div>
   <canvas id="profile"></canvas>
+  <label class="toggle" style="margin-top:8px"><input type="checkbox" id="t-sharp"><span class="box" style="border-color:rgba(94,240,138,.6)"></span>Max sharpness (auto-focus)<span class="val" id="sharpZval" style="margin-left:auto;color:#5ef08a"></span></label>
 
   <h2 class="mt">Recorded hologram</h2>
   <div class="thumbs">
@@ -221,6 +222,7 @@
   let zIndex = 20;
   let k = 0;                 // acquired points
   let profile = [];
+  let sharpIdx = null, showSharp = false;
   let scanning = false, scanStart = 0, scanDur = 8.0;
 
   // ---------- status ----------
@@ -252,6 +254,7 @@
     document.getElementById("slice").src = "data:image/png;base64," + d.slice;
     if(kind==="recon"){
       profile = d.profile;
+      if(d.sharpIndex!=null){ sharpIdx=d.sharpIndex; document.getElementById("sharpZval").textContent=d.sharpZ.toFixed(2)+" m"; }
       if(hol && d.amp){ document.getElementById("holoAmp").src="data:image/png;base64,"+d.amp;
         document.getElementById("holoPhase").src="data:image/png;base64,"+d.phase; }
     }
@@ -283,6 +286,8 @@
     g.beginPath(); profile.forEach((v,i)=> i?g.lineTo(X(i),Yv(v)):g.moveTo(X(i),Yv(v)));
     g.strokeStyle=COL.cyanDim; g.lineWidth=1.6; g.stroke();
     g.lineTo(X(n-1),h-pad); g.lineTo(X(0),h-pad); g.closePath(); g.fillStyle="rgba(43,182,207,.12)"; g.fill();
+    if(showSharp && sharpIdx!=null){ g.strokeStyle="#5ef08a"; g.lineWidth=1.6; g.setLineDash([4,3]);
+      g.beginPath(); g.moveTo(X(sharpIdx),pad); g.lineTo(X(sharpIdx),h-pad); g.stroke(); g.setLineDash([]); }
     const mc = {single:COL.cyan,white:COL.amber,dark:COL.magenta}[mode];
     g.strokeStyle=mc; g.lineWidth=1.5; g.beginPath(); g.moveTo(X(zIndex),pad); g.lineTo(X(zIndex),h-pad); g.stroke();
     g.fillStyle=mc; g.beginPath(); g.arc(X(zIndex),Yv(profile[zIndex]||0),3,0,7); g.fill();
@@ -370,6 +375,7 @@
   document.getElementById("m-white").onclick=()=>setMode("white");
   document.getElementById("m-dark").onclick=()=>setMode("dark");
   document.getElementById("depth").addEventListener("input",e=>{ zIndex=+e.target.value; updateDepthReadout(); schedule("slice",false); });
+  document.getElementById("t-sharp").addEventListener("change",e=>{ showSharp=e.target.checked; drawProfile(); });
 
   // ---------- scan ----------
   const scanBtn=document.getElementById("scanBtn"), scanBar=document.getElementById("scanBar"),
@@ -478,6 +484,11 @@
     if(opt.recon){ const mc={single:"56,225,214",white:"255,181,69",dark:"255,93,158"}[mode];
       pit.push({d:dot3(sub([Lx/2,Ly/2,reconZ],eye),fwd), fn:()=>{ poly([[0,0,reconZ],[Lx,0,reconZ],[Lx,Ly,reconZ],[0,Ly,reconZ]],`rgba(${mc},0.10)`,`rgba(${mc},0.9)`,1.6);
         lbl([0,Ly,reconZ],"recon z="+reconZ.toFixed(2),`rgb(${mc})`,6,-6); }}); }
+    // max-sharpness (auto-focus) plane
+    if(showSharp && sharpIdx!=null && sharpIdx<S.z.length){ const sz=S.z[sharpIdx];
+      pit.push({d:dot3(sub([Lx/2,Ly/2,sz],eye),fwd), fn:()=>{
+        poly([[0,0,sz],[Lx,0,sz],[Lx,Ly,sz],[0,Ly,sz]],"rgba(94,240,138,0.08)","rgba(94,240,138,0.9)",1.6);
+        lbl([Lx,0,sz],"max sharpness z="+sz.toFixed(2),"rgb(94,240,138)",6,10); }}); }
     // multipath room walls (where the image-source model places them)
     const mpOn = S.params && S.params.multipath;
     if(mpOn && S.room){ const Rm=S.room;

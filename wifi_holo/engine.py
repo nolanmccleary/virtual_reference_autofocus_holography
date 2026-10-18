@@ -223,12 +223,18 @@ class HoloEngine:
         # depth-focus curve uses the global max; the displayed slice is
         # normalised to ITS OWN max so every depth is vivid (as in the paper).
         prof = (vol.reshape(len(self.z_values), -1).max(axis=1) / gmax)
+        # autofocus sharpness: summed squared intensity per slice (SAR/holography)
+        sharp = (vol ** 2).reshape(len(self.z_values), -1).sum(axis=1)
+        sharp_index = int(np.argmax(sharp))
         z_index = int(np.clip(z_index, 0, len(self.z_values) - 1))
         sl = vol[z_index]
         slice01 = (sl / (sl.max() or 1.0)) ** gamma
         return {
             "slice": _png_b64(slice01, "inferno"),
             "profile": prof.tolist(),
+            "sharpness": (sharp / (sharp.max() or 1.0)).tolist(),
+            "sharpIndex": sharp_index,
+            "sharpZ": float(self.z_values[sharp_index]),
             "zIndex": z_index,
             "z": float(self.z_values[z_index]),
         }
