@@ -125,11 +125,12 @@ class HoloEngine:
         self.ref = [complex(u[ry, rx]) or 1.0 for u in Ufull]
         self.U = [u[np.ix_(self._srow, self._scol)] for u in Ufull]   # block-filled samples
 
-        # emitter-plane Gaussian mask for dark-field
+        # emitter-plane window that KEEPS just the focus, to estimate the direct
+        # illumination for dark-field (forward-propagated to each depth).
         X, Y = s.grids()
         ex, ey = s.emitter_xy
-        sigma = 6.0 * s.carrier_wavelength
-        self.emitter_mask = 1.0 - 0.9 * np.exp(-((X - ex) ** 2 + (Y - ey) ** 2) / (2 * sigma ** 2))
+        sigma = s.carrier_wavelength            # ~1 wavelength around the focus
+        self.emitter_pass = np.exp(-((X - ex) ** 2 + (Y - ey) ** 2) / (2 * sigma ** 2))
 
     # -------------------------------------------------------------- aperture
     def _aperture(self, k: int) -> np.ndarray:
@@ -161,18 +162,21 @@ class HoloEngine:
                     vol[i] += np.abs(self._bp(holo, z, wl)) ** 2
 
         elif mode == "dark":
-            masked_sum = np.zeros_like(vol)
+            # dark-field = illumination estimate - measured field (the light the
+            # object removed -> object appears bright). Illumination is the emitter
+            # focus alone, forward-propagated to each depth.
+            illum_sum = np.zeros_like(vol)
             direct_sum = np.zeros_like(vol)
             for fi, f in enumerate(self.freqs):
                 holo = (self.U[fi] * mask) / self.ref[fi]
                 wl = wavelength_of(f)
-                u_emit = self._bp(holo, s.z_emitter, wl) * self.emitter_mask
+                emitter_only = self._bp(holo, s.z_emitter, wl) * self.emitter_pass
                 for i, z in enumerate(self.z_values):
+                    illum = angular_spectrum_propagate(
+                        emitter_only, dz=(s.z_emitter - z), wavelength=wl, dx=s.dx, dy=s.dy)
+                    illum_sum[i] += np.abs(illum) ** 2
                     direct_sum[i] += np.abs(self._bp(holo, z, wl)) ** 2
-                    u_obj = angular_spectrum_propagate(
-                        u_emit, dz=(s.z_emitter - z), wavelength=wl, dx=s.dx, dy=s.dy)
-                    masked_sum[i] += np.abs(u_obj) ** 2
-            vol = np.clip(masked_sum - direct_sum, 0.0, None)
+            vol = np.clip(illum_sum - direct_sum, 0.0, None)
         else:
             raise ValueError(f"unknown mode {mode!r}")
         return vol
@@ -192,16 +196,16 @@ class HoloEngine:
                 acc += np.abs(self._bp(holo, z, wavelength_of(f))) ** 2
             return acc
         if mode == "dark":
-            masked = np.zeros((self.ny, self.nx))
+            illum = np.zeros((self.ny, self.nx))
             direct = np.zeros((self.ny, self.nx))
             for fi, f in enumerate(self.freqs):
                 wl = wavelength_of(f)
                 holo = (self.U[fi] * mask) / self.ref[fi]
-                u_emit = self._bp(holo, s.z_emitter, wl) * self.emitter_mask
+                emitter_only = self._bp(holo, s.z_emitter, wl) * self.emitter_pass
                 direct += np.abs(self._bp(holo, z, wl)) ** 2
-                masked += np.abs(angular_spectrum_propagate(
-                    u_emit, dz=(s.z_emitter - z), wavelength=wl, dx=s.dx, dy=s.dy)) ** 2
-            return np.clip(masked - direct, 0.0, None)
+                illum += np.abs(angular_spectrum_propagate(
+                    emitter_only, dz=(s.z_emitter - z), wavelength=wl, dx=s.dx, dy=s.dy)) ** 2
+            return np.clip(illum - direct, 0.0, None)
         raise ValueError(f"unknown mode {mode!r}")
 
     def slice_only(self, mode: str, z_index: int, k: int, gamma: float = 0.7) -> dict:
