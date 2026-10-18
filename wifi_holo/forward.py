@@ -21,22 +21,32 @@ from .sources import point_source_field, wavelength_of
 
 
 def record_hologram(scene: CrossScene, frequency_hz: float) -> np.ndarray:
-    """Complex field recorded on the scan plane (z=0) for one frequency."""
+    """Complex field recorded on the scan plane (z=0) for one frequency.
+
+    A finite-thickness cross is modelled as a short stack of thin absorbing
+    masks spanning [z_object - T/2, z_object + T/2]; the wave is propagated
+    slice-to-slice through them. Thickness 0 reduces to a single thin mask.
+    """
     wavelength = wavelength_of(frequency_hz)
     X, Y = scene.grids()
+    mask = scene.cross_mask()
+    T = scene.cross_thickness
 
-    # 1. emitter -> object plane (analytic spherical wave)
-    u_obj = point_source_field(X, Y, scene.z_object, scene.emitter_xyz, wavelength)
+    if T <= 0:
+        planes = [scene.z_object]
+    else:
+        n = int(np.clip(round(T / 0.05) + 1, 2, 6))
+        planes = list(np.linspace(scene.z_object + T / 2.0, scene.z_object - T / 2.0, n))
 
-    # 2. apply object transmission
-    u_obj = u_obj * scene.cross_mask()
-
-    # 3. object plane -> recording plane (toward the recorder, distance z_object)
-    #    The wave travels away from the source, so dz = +z_object.
-    u_rec = angular_spectrum_propagate(
-        u_obj, dz=scene.z_object, wavelength=wavelength, dx=scene.dx, dy=scene.dy
-    )
-    return u_rec
+    # launch the spherical wave onto the first (farthest) object slice
+    u = point_source_field(X, Y, planes[0], scene.emitter_xyz, wavelength)
+    for i, zp in enumerate(planes):
+        u = u * mask                                   # absorb at this slice
+        next_z = planes[i + 1] if i + 1 < len(planes) else 0.0
+        u = angular_spectrum_propagate(
+            u, dz=(zp - next_z), wavelength=wavelength, dx=scene.dx, dy=scene.dy
+        )
+    return u
 
 
 def reference_value(scene: CrossScene, frequency_hz: float) -> complex:

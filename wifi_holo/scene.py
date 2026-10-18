@@ -38,6 +38,7 @@ class CrossScene:
     cross_center_xy: tuple[float, float] | None = None
     cross_arm_length: float = 1.00   # full span of each arm (m)
     cross_arm_width: float = 0.20    # arm thickness (m)
+    cross_thickness: float = 0.0     # depth extent of the cross slab (m); 0 = thin
 
     # --- frequency / illumination ---
     carrier_hz: float = 5.0e9        # 5 GHz Wi-Fi channel

@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wi-Fi Holography — live simulator</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg0:#0d1420; --bg1:#080b12;
+    --panel:rgba(14,20,32,0.80); --panel-border:rgba(120,150,190,0.18);
+    --text:#c9d4e4; --muted:#6b7a90;
+    --cyan:#38e1d6; --cyan-dim:#2bb6cf; --amber:#ffb545; --amber-hot:#ff7a2f;
+    --magenta:#ff5d9e; --steel:#9aa7bb;
+    --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+    --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; }
+  body {
+    background:radial-gradient(130% 110% at 70% 15%,var(--bg0),var(--bg1) 70%);
+    color:var(--text); font-family:var(--font-sans); overflow:hidden;
+  }
+  #stage { position:fixed; inset:0; }
+  #view { display:block; width:100%; height:100%; cursor:grab; touch-action:none; }
+  #view:active { cursor:grabbing; }
+  .overlay { position:fixed; pointer-events:none; }
+
+  .masthead { top:20px; left:24px; max-width:340px; z-index:5; }
+  .eyebrow { font-family:var(--font-mono); font-size:10.5px; letter-spacing:.22em; text-transform:uppercase; color:var(--cyan); margin:0 0 5px; }
+  .masthead h1 { font-size:19px; font-weight:650; letter-spacing:-.01em; margin:0; line-height:1.15; text-wrap:balance; }
+  .status { display:inline-flex; align-items:center; gap:6px; margin-top:7px; font-family:var(--font-mono); font-size:10.5px; color:var(--muted); }
+  .status .dot { width:7px; height:7px; border-radius:50%; background:var(--cyan-dim); box-shadow:0 0 8px var(--cyan); transition:.2s; }
+  .status .dot.busy { background:var(--amber); box-shadow:0 0 8px var(--amber); }
+
+  .panel {
+    pointer-events:auto; position:fixed; background:var(--panel);
+    border:1px solid var(--panel-border); border-radius:12px; padding:14px 15px 15px;
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 18px 50px -20px rgba(0,0,0,.7); overflow-y:auto;
+  }
+  .panel::-webkit-scrollbar { width:8px; }
+  .panel::-webkit-scrollbar-thumb { background:rgba(120,150,190,.25); border-radius:4px; }
+  .panel h2 { font-family:var(--font-mono); font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); margin:0 0 10px; font-weight:600; }
+  .panel h2.mt { margin-top:16px; }
+
+  .left { top:112px; left:24px; width:256px; max-height:calc(100vh - 134px); }
+  .right { top:20px; right:22px; width:300px; max-height:calc(100vh - 42px); }
+
+  /* scan */
+  .scanbtn { width:100%; padding:9px; border-radius:8px; background:var(--cyan); color:#061018; font-weight:650; border:none; cursor:pointer; font-size:13px; font-family:var(--font-sans); transition:.15s; }
+  .scanbtn:hover { filter:brightness(1.08); }
+  .scanbtn.stop { background:var(--magenta); color:#140208; }
+  .progress { height:6px; background:rgba(120,150,190,.15); border-radius:3px; overflow:hidden; margin:10px 0 5px; }
+  .progress .bar { height:100%; width:0%; background:var(--cyan); transition:width .08s linear; }
+  .ptext { font-family:var(--font-mono); font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+
+  /* control rows */
+  .ctl { margin:9px 0; }
+  .ctl .row { display:flex; justify-content:space-between; align-items:baseline; font-size:12px; margin-bottom:2px; }
+  .ctl .row .name { color:var(--text); }
+  .ctl .row .val { font-family:var(--font-mono); font-size:11.5px; color:var(--cyan); font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; accent-color:var(--cyan); cursor:pointer; margin:2px 0; }
+  input[type=range]:disabled { accent-color:var(--muted); opacity:.5; cursor:default; }
+  .lam { font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:6px; }
+  .lam b { color:var(--text); }
+
+  /* toggles */
+  .toggle { display:flex; align-items:center; gap:9px; font-size:12px; padding:3.5px 0; cursor:pointer; user-select:none; color:var(--text); }
+  .toggle input { display:none; }
+  .box { width:15px; height:15px; border-radius:4px; border:1.5px solid var(--panel-border); flex:none; display:grid; place-items:center; transition:.15s; }
+  .box::after { content:""; width:7px; height:7px; border-radius:1.5px; background:var(--cyan); transform:scale(0); transition:transform .15s; box-shadow:0 0 8px var(--cyan); }
+  .toggle input:checked + .box { border-color:var(--cyan); }
+  .toggle input:checked + .box::after { transform:scale(1); }
+
+  /* reconstruction */
+  .recon-view { position:relative; width:100%; aspect-ratio:3/2; border-radius:8px; overflow:hidden; background:#05070c; border:1px solid var(--panel-border); }
+  .recon-view img { width:100%; height:100%; display:block; image-rendering:auto; }
+  .recon-view .tag { position:absolute; left:8px; top:7px; font-family:var(--font-mono); font-size:10.5px; color:var(--text); background:rgba(5,7,12,.6); padding:2px 7px; border-radius:5px; }
+  .recon-view .sb { position:absolute; right:8px; bottom:9px; height:3px; width:33.3%; background:#eaf2ff; box-shadow:0 0 0 1px rgba(5,7,12,.5); }
+  .recon-view .sb span { position:absolute; right:0; bottom:6px; font-family:var(--font-mono); font-size:9.5px; color:#eaf2ff; }
+  .seg { display:flex; gap:4px; margin:11px 0 10px; }
+  .seg button { flex:1; font-family:var(--font-sans); font-size:11.5px; color:var(--muted); background:rgba(120,150,190,.08); border:1px solid var(--panel-border); border-radius:7px; padding:6px 3px; cursor:pointer; transition:.15s; }
+  .seg button:hover { color:var(--text); }
+  .seg button[aria-pressed="true"] { color:#061018; background:var(--cyan); border-color:var(--cyan); font-weight:600; }
+  .depth-row { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:3px; }
+  .depth-row .lab { font-size:11px; color:var(--muted); font-family:var(--font-mono); letter-spacing:.08em; text-transform:uppercase; }
+  .depth-row .zval { font-family:var(--font-mono); font-size:13px; color:var(--cyan); font-variant-numeric:tabular-nums; }
+  .depth-row .zval.off { color:var(--muted); }
+  .ticks { position:relative; height:13px; font-family:var(--font-mono); font-size:9px; color:var(--muted); }
+  .ticks span { position:absolute; transform:translateX(-50%); white-space:nowrap; }
+  #profile { width:100%; height:56px; display:block; margin-top:5px; }
+  .thumbs { display:flex; gap:8px; }
+  .thumb { flex:1; margin:0; }
+  .thumb img { width:100%; border-radius:5px; border:1px solid var(--panel-border); display:block; background:#05070c; aspect-ratio:3/2; }
+  .thumb figcaption { font-family:var(--font-mono); font-size:9.5px; color:var(--muted); margin:3px 0 0; text-align:center; }
+
+  .posgrp { margin-top:11px; }
+  .glabel { font-family:var(--font-mono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; font-weight:600; margin-bottom:3px; }
+  .xy { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .xy .ctl { margin:5px 0; }
+  .poshint { font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:7px; }
+
+  .hint { bottom:16px; left:24px; font-family:var(--font-mono); font-size:11px; color:var(--muted); }
+  .hint kbd { background:rgba(120,150,190,.12); border:1px solid var(--panel-border); border-radius:4px; padding:1px 6px; font-family:inherit; color:var(--text); }
+
+  @media (max-width:980px) {
+    .left { display:none; } .hint { display:none; } .masthead { max-width:50%; }
+    .right { top:auto; bottom:12px; right:12px; left:12px; width:auto; max-height:52vh; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="view"></canvas></div>
+
+<div class="overlay masthead">
+  <p class="eyebrow">Holography of Wi-Fi Radiation · PRL 118, 183901</p>
+  <h1>Live cross-scene simulator</h1>
+  <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">ready</span></div>
+</div>
+
+<div class="panel left">
+  <h2>Scan</h2>
+  <button class="scanbtn" id="scanBtn">Begin scan</button>
+  <div class="progress"><div class="bar" id="scanBar"></div></div>
+  <div class="ptext" id="scanText">0 / 0 points · idle</div>
+  <div class="ctl" style="margin-top:11px">
+    <div class="row"><span class="name">Scan time</span><span class="val" id="speedVal">8.0 s</span></div>
+    <input type="range" id="speed" min="2" max="30" value="8" step="0.5">
+  </div>
+
+  <h2 class="mt">Parameters</h2>
+  <div class="ctl"><div class="row"><span class="name">Carrier</span><span class="val" id="carrierVal">5.0 GHz</span></div><input type="range" id="carrier" min="2.0" max="6.0" value="5.0" step="0.1"></div>
+  <div class="ctl"><div class="row"><span class="name">Bandwidth</span><span class="val" id="bandVal">70 MHz</span></div><input type="range" id="band" min="0" max="200" value="70" step="5"></div>
+  <div class="ctl"><div class="row"><span class="name">Freq. samples</span><span class="val" id="nfreqVal">32</span></div><input type="range" id="nfreq" min="1" max="48" value="32" step="1"></div>
+  <div class="ctl"><div class="row"><span class="name">Scan grid</span><span class="val" id="nxVal">120 px</span></div><input type="range" id="nx" min="48" max="176" value="120" step="4"></div>
+  <div class="lam">&lambda; = <b id="lamVal">6.0 cm</b> &nbsp;·&nbsp; derived from carrier</div>
+
+  <h2 class="mt">Show</h2>
+  <label class="toggle"><input type="checkbox" id="t-recon" checked><span class="box"></span>Reconstruction plane</label>
+  <label class="toggle"><input type="checkbox" id="t-cone" checked><span class="box"></span>Illumination cone</label>
+  <label class="toggle"><input type="checkbox" id="t-rays"><span class="box"></span>Shadow rays</label>
+  <label class="toggle"><input type="checkbox" id="t-grid" checked><span class="box"></span>Scan grid</label>
+  <label class="toggle"><input type="checkbox" id="t-spin" checked><span class="box"></span>Auto-rotate</label>
+</div>
+
+<div class="panel right">
+  <h2>Reconstruction</h2>
+  <div class="recon-view">
+    <img id="slice" alt="reconstructed intensity slice">
+    <div class="tag" id="sliceTag">z = —</div>
+    <div class="sb"><span>1 m</span></div>
+  </div>
+  <div class="seg" role="group" aria-label="mode">
+    <button id="m-single" aria-pressed="true">Single f</button>
+    <button id="m-white" aria-pressed="false">White-light</button>
+    <button id="m-dark" aria-pressed="false">Dark-field</button>
+  </div>
+  <div class="depth-row"><span class="lab">Depth z</span><span class="zval" id="zval">—</span></div>
+  <input type="range" id="depth" min="0" max="40" value="20" step="1">
+  <div class="ticks" id="ticks"></div>
+  <canvas id="profile"></canvas>
+
+  <h2 class="mt">Recorded hologram</h2>
+  <div class="thumbs">
+    <figure class="thumb"><img id="holoAmp" alt="hologram amplitude"><figcaption>amplitude</figcaption></figure>
+    <figure class="thumb"><img id="holoPhase" alt="hologram phase"><figcaption>phase</figcaption></figure>
+  </div>
+
+  <h2 class="mt">Geometry positions</h2>
+  <div class="posgrp">
+    <div class="glabel" style="color:var(--amber)">Router</div>
+    <div class="xy">
+      <div class="ctl"><div class="row"><span class="name">X</span><span class="val" id="emxVal">150 cm</span></div><input type="range" id="emx" min="0" max="300" value="150" step="5"></div>
+      <div class="ctl"><div class="row"><span class="name">Y</span><span class="val" id="emyVal">100 cm</span></div><input type="range" id="emy" min="0" max="200" value="100" step="5"></div>
+    </div>
+    <div class="ctl"><div class="row"><span class="name">Z (dist)</span><span class="val" id="zemVal">230 cm</span></div><input type="range" id="zem" min="100" max="350" value="230" step="5"></div>
+  </div>
+  <div class="posgrp">
+    <div class="glabel" style="color:var(--steel)">Cross</div>
+    <div class="xy">
+      <div class="ctl"><div class="row"><span class="name">X</span><span class="val" id="cxVal">150 cm</span></div><input type="range" id="cx" min="0" max="300" value="150" step="5"></div>
+      <div class="ctl"><div class="row"><span class="name">Y</span><span class="val" id="cyVal">100 cm</span></div><input type="range" id="cy" min="0" max="200" value="100" step="5"></div>
+    </div>
+    <div class="xy">
+      <div class="ctl"><div class="row"><span class="name">Z (dist)</span><span class="val" id="zobVal">140 cm</span></div><input type="range" id="zob" min="30" max="330" value="140" step="5"></div>
+      <div class="ctl"><div class="row"><span class="name">Arm</span><span class="val" id="armVal">100 cm</span></div><input type="range" id="arm" min="20" max="180" value="100" step="5"></div>
+    </div>
+    <div class="ctl"><div class="row"><span class="name">Thickness</span><span class="val" id="thkVal">5 cm</span></div><input type="range" id="thk" min="0" max="60" value="5" step="1"></div>
+  </div>
+  <div class="posgrp">
+    <div class="glabel" style="color:var(--magenta)">Reference</div>
+    <div class="xy">
+      <div class="ctl"><div class="row"><span class="name">X</span><span class="val" id="rxVal">45 cm</span></div><input type="range" id="rx" min="0" max="300" value="45" step="5"></div>
+      <div class="ctl"><div class="row"><span class="name">Y</span><span class="val" id="ryVal">30 cm</span></div><input type="range" id="ry" min="0" max="200" value="30" step="5"></div>
+    </div>
+    <div class="poshint">on scan plane (z = 0)</div>
+  </div>
+</div>
+
+<div class="overlay hint"><kbd>drag</kbd> orbit · <kbd>scroll</kbd> zoom · <kbd>Begin scan</kbd> to acquire</div>
+
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("view");
+  const ctx = canvas.getContext("2d");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const COL = { cyan:"#38e1d6", cyanDim:"#2bb6cf", amber:"#ffb545", magenta:"#ff5d9e", steel:"#9aa7bb", white:"#eaf2ff" };
+
+  let S = null;              // server state (geometry + z axis)
+  let mode = "single";
+  let zIndex = 20;
+  let k = 0;                 // acquired points
+  let profile = [];
+  let scanning = false, scanStart = 0, scanDur = 8.0;
+
+  // ---------- status ----------
+  const dot = document.getElementById("statusDot"), statusText = document.getElementById("statusText");
+  function setStatus(t, busy){ statusText.textContent = t; dot.classList.toggle("busy", !!busy); }
+
+  // ---------- request scheduler (coalescing) ----------
+  // kind 'recon' = full depth stack (refreshes profile + hologram); 'slice' = one
+  // depth only (fast z-scrubbing). A recon pending beats a slice.
+  let pending = false, dirty = false, dirtyKind = "slice", wantHol = false;
+  function schedule(kind, hol){ if(hol) wantHol = true; if(kind==="recon") dirtyKind="recon"; dirty = true; pump(); }
+  function pump(){
+    if(pending || !dirty || !S) return;
+    pending = true; dirty = false; const kind = dirtyKind; dirtyKind = "slice";
+    const hol = wantHol; wantHol = false;
+    setStatus(scanning ? "scanning…" : "computing…", true);
+    const url = kind==="recon"
+      ? `/api/recon?mode=${mode}&zi=${zIndex}&k=${k}&hol=${hol?1:0}`
+      : `/api/slice?mode=${mode}&zi=${zIndex}&k=${k}`;
+    fetch(url).then(r=>r.json()).then(d=>{
+      if(d.error){ setStatus("error: "+d.error); return; }
+      applyData(d, kind, hol);
+    }).catch(()=>setStatus("offline")).finally(()=>{
+      pending = false;
+      if(dirty) pump(); else setStatus(scanning ? "scanning…" : "ready", false);
+    });
+  }
+  function applyData(d, kind, hol){
+    document.getElementById("slice").src = "data:image/png;base64," + d.slice;
+    if(kind==="recon"){
+      profile = d.profile;
+      if(hol && d.amp){ document.getElementById("holoAmp").src="data:image/png;base64,"+d.amp;
+        document.getElementById("holoPhase").src="data:image/png;base64,"+d.phase; }
+    }
+    updateDepthReadout();
+  }
+  // instant cursor + readout, independent of the compute round-trip
+  function updateDepthReadout(){
+    if(!S) return;
+    const z = S.z[Math.min(zIndex, S.z.length-1)];
+    const near = Math.abs(z-S.zEmitter)<0.04 ? " · emitter" : (Math.abs(z-S.zObject)<0.04 ? " · object" : "");
+    document.getElementById("sliceTag").textContent =
+      (mode==="dark" ? "dark-field · " : "") + "z = " + z.toFixed(2) + " m" + near;
+    const zv = document.getElementById("zval"); zv.textContent = z.toFixed(2)+" m"; zv.classList.remove("off");
+    drawProfile();
+  }
+
+  // ---------- profile mini-plot ----------
+  const profCv = document.getElementById("profile");
+  function drawProfile(){
+    if(!S) return;
+    const g = profCv.getContext("2d"), dpr=Math.min(devicePixelRatio||1,2);
+    const w=profCv.clientWidth, h=profCv.clientHeight;
+    profCv.width=w*dpr; profCv.height=h*dpr; g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
+    if(!profile.length) return;
+    const n=profile.length, pad=3, X=i=>pad+i/(n-1)*(w-2*pad), Yv=v=>h-pad-v*(h-2*pad);
+    const zi=zt=>{ let bi=0,bd=1e9; S.z.forEach((z,i)=>{const dd=Math.abs(z-zt); if(dd<bd){bd=dd;bi=i;}}); return bi; };
+    [[zi(S.zObject),COL.steel],[zi(S.zEmitter),COL.amber]].forEach(([i,c])=>{
+      g.strokeStyle=c; g.globalAlpha=.4; g.lineWidth=1; g.beginPath(); g.moveTo(X(i),pad); g.lineTo(X(i),h-pad); g.stroke(); g.globalAlpha=1; });
+    g.beginPath(); profile.forEach((v,i)=> i?g.lineTo(X(i),Yv(v)):g.moveTo(X(i),Yv(v)));
+    g.strokeStyle=COL.cyanDim; g.lineWidth=1.6; g.stroke();
+    g.lineTo(X(n-1),h-pad); g.lineTo(X(0),h-pad); g.closePath(); g.fillStyle="rgba(43,182,207,.12)"; g.fill();
+    const mc = {single:COL.cyan,white:COL.amber,dark:COL.magenta}[mode];
+    g.strokeStyle=mc; g.lineWidth=1.5; g.beginPath(); g.moveTo(X(zIndex),pad); g.lineTo(X(zIndex),h-pad); g.stroke();
+    g.fillStyle=mc; g.beginPath(); g.arc(X(zIndex),Yv(profile[zIndex]||0),3,0,7); g.fill();
+  }
+
+  // ---------- state load + UI sync ----------
+  function applyState(st){
+    S = st;
+    document.getElementById("depth").max = S.z.length-1;
+    if(zIndex > S.z.length-1) zIndex = S.iObject;
+    // ticks
+    const ticks=document.getElementById("ticks"); ticks.innerHTML="";
+    const addTick=(zt,txt)=>{ let bi=0,bd=1e9; S.z.forEach((z,i)=>{const dd=Math.abs(z-zt);if(dd<bd){bd=dd;bi=i;}});
+      const s=document.createElement("span"); s.textContent=txt; s.style.left=(bi/(S.z.length-1)*100)+"%"; ticks.appendChild(s); };
+    addTick(S.z[0],S.z[0].toFixed(1)); addTick(S.zObject,"obj"); addTick(S.zEmitter,"emit"); addTick(S.z[S.z.length-1],S.z[S.z.length-1].toFixed(1));
+    document.getElementById("lamVal").textContent = S.lambdaCm.toFixed(1)+" cm";
+    document.getElementById("depth").value = zIndex;
+    // reflect server params back into the sliders
+    if(st.params){ const map={carrier_ghz:"carrier",bandwidth_mhz:"band",n_freq:"nfreq",nx:"nx",
+      z_emitter_cm:"zem",z_object_cm:"zob",cross_arm_cm:"arm",cross_thickness_cm:"thk",
+      emitter_x_cm:"emx",emitter_y_cm:"emy",cross_x_cm:"cx",cross_y_cm:"cy",ref_x_cm:"rx",ref_y_cm:"ry"};
+      for(const kk in map){ const el=R[map[kk]]; if(el){ el.value=st.params[kk]; liveLabel(map[kk]); } } }
+  }
+
+  // ---------- parameter controls ----------
+  const cm = v=>v+" cm";
+  const fmt = { carrier:v=>v.toFixed(1)+" GHz", band:v=>v+" MHz", nfreq:v=>""+v, nx:v=>v+" px",
+    emx:cm, emy:cm, zem:cm, cx:cm, cy:cm, zob:cm, arm:cm, thk:cm, rx:cm, ry:cm };
+  const valEls = { carrier:"carrierVal", band:"bandVal", nfreq:"nfreqVal", nx:"nxVal",
+    emx:"emxVal", emy:"emyVal", zem:"zemVal", cx:"cxVal", cy:"cyVal", zob:"zobVal",
+    arm:"armVal", thk:"thkVal", rx:"rxVal", ry:"ryVal" };
+  const PARAM_IDS = Object.keys(valEls);
+  const R = {}; PARAM_IDS.forEach(id=>R[id]=document.getElementById(id));
+  let paramTimer = null;
+  function readParams(){
+    return {
+      carrier_ghz:+R.carrier.value, bandwidth_mhz:+R.band.value, n_freq:+R.nfreq.value, nx:+R.nx.value,
+      z_emitter_cm:+R.zem.value, z_object_cm:+R.zob.value, cross_arm_cm:+R.arm.value, cross_thickness_cm:+R.thk.value,
+      emitter_x_cm:+R.emx.value, emitter_y_cm:+R.emy.value,
+      cross_x_cm:+R.cx.value, cross_y_cm:+R.cy.value, ref_x_cm:+R.rx.value, ref_y_cm:+R.ry.value
+    };
+  }
+  function postParams(){
+    if(scanning) return;  // never recompute mid-scan
+    setStatus("recomputing…", true);
+    fetch("/api/params",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(readParams())})
+      .then(r=>r.json()).then(st=>{ applyState(st); k = S.total; updateScanText(); schedule("recon",true); })
+      .catch(()=>setStatus("offline"));
+  }
+  function liveLabel(id){ document.getElementById(valEls[id]).textContent = fmt[id](+R[id].value);
+    if(id==="carrier") document.getElementById("lamVal").textContent = (29.9792458/(+R.carrier.value)).toFixed(1)+" cm";
+  }
+  PARAM_IDS.forEach(id=>{
+    R[id].addEventListener("input", ()=>{ liveLabel(id); clearTimeout(paramTimer); paramTimer=setTimeout(postParams,260); });
+  });
+  // lock parameter + position + speed sliders while a scan is running
+  function setParamLock(dis){ PARAM_IDS.forEach(id=>R[id].disabled=dis); document.getElementById("speed").disabled=dis; }
+
+  // ---------- mode + depth ----------
+  function setMode(m){ mode=m;
+    document.getElementById("m-single").setAttribute("aria-pressed",m==="single");
+    document.getElementById("m-white").setAttribute("aria-pressed",m==="white");
+    document.getElementById("m-dark").setAttribute("aria-pressed",m==="dark");
+    // dark-field is now a full focus series, so the depth slider stays live in every mode
+    schedule("recon",false);
+  }
+  document.getElementById("m-single").onclick=()=>setMode("single");
+  document.getElementById("m-white").onclick=()=>setMode("white");
+  document.getElementById("m-dark").onclick=()=>setMode("dark");
+  document.getElementById("depth").addEventListener("input",e=>{ zIndex=+e.target.value; updateDepthReadout(); schedule("slice",false); });
+
+  // ---------- scan ----------
+  const scanBtn=document.getElementById("scanBtn"), scanBar=document.getElementById("scanBar"),
+        speed=document.getElementById("speed");
+  speed.addEventListener("input",()=>{ scanDur=+speed.value; document.getElementById("speedVal").textContent=scanDur.toFixed(1)+" s"; });
+  function updateScanText(){ if(!S) return;
+    document.getElementById("scanText").textContent = `${k} / ${S.total} points · ${scanning?"scanning":(k>=S.total?"complete":"idle")}`;
+    scanBar.style.width = (S.total?100*k/S.total:0)+"%";
+  }
+  scanBtn.onclick=()=>{
+    if(!S) return;
+    if(scanning){ scanning=false; k=S.total; scanBtn.textContent="Begin scan"; scanBtn.classList.remove("stop"); setParamLock(false); updateScanText(); schedule("recon",true); return; }
+    scanning=true; scanStart=performance.now(); k=0; scanBtn.textContent="Stop"; scanBtn.classList.add("stop");
+    setParamLock(true); lastReq=0;
+  };
+  let lastReq=0;
+
+  // ---------- 3D scene ----------
+  const target=[1.5,1.0,1.05]; let az=-0.72, el=0.34, dist=6.8;
+  const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const crs=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const nrm=v=>{const m=Math.hypot(v[0],v[1],v[2])||1;return[v[0]/m,v[1]/m,v[2]/m];};
+  let W=0,H=0,focal=600,eye=[0,0,0],right=[1,0,0],camUp=[0,1,0],fwd=[0,0,1];
+  function cam(){ const ce=Math.cos(el),se=Math.sin(el),ca=Math.cos(az),sa=Math.sin(az);
+    const dir=[ce*sa,se,ce*ca]; eye=[target[0]+dir[0]*dist,target[1]+dir[1]*dist,target[2]+dir[2]*dist];
+    fwd=nrm(sub(target,eye)); right=nrm(crs(fwd,[0,1,0])); camUp=crs(right,fwd); focal=(H/2)/Math.tan((42*Math.PI/180)/2); }
+  function proj(p){ const v=sub(p,eye),cz=dot3(v,fwd); if(cz<0.05)return null; return {x:W/2+dot3(v,right)*focal/cz,y:H/2-dot3(v,camUp)*focal/cz,depth:cz}; }
+  function poly(pts,fill,stroke,lw){ const ps=pts.map(proj); if(ps.some(p=>!p))return; ctx.beginPath();
+    ps.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.closePath();
+    if(fill){ctx.fillStyle=fill;ctx.fill();} if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=lw||1;ctx.stroke();} }
+  function seg(a,b,c,lw,al){ const pa=proj(a),pb=proj(b); if(!pa||!pb)return; ctx.globalAlpha=al==null?1:al;
+    ctx.strokeStyle=c; ctx.lineWidth=lw||1; ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y); ctx.stroke(); ctx.globalAlpha=1; }
+  function lbl(p,t,c,dx,dy){ const pp=proj(p); if(!pp)return; ctx.font="11px ui-monospace,Menlo,monospace"; ctx.fillStyle=c;
+    ctx.textAlign="left"; ctx.textBaseline="middle"; ctx.fillText(t,pp.x+(dx||8),pp.y+(dy||0)); }
+  function crossPoly(cx,cy,L,w,z){ return [[cx-w,cy+L],[cx+w,cy+L],[cx+w,cy+w],[cx+L,cy+w],[cx+L,cy-w],[cx+w,cy-w],
+    [cx+w,cy-L],[cx-w,cy-L],[cx-w,cy-w],[cx-L,cy-w],[cx-L,cy+w],[cx-w,cy+w]].map(([x,y])=>[x,y,z]); }
+  function inCross(x,y,cx,cy,L,w){ return (Math.abs(x-cx)<=L&&Math.abs(y-cy)<=w)||(Math.abs(y-cy)<=L&&Math.abs(x-cx)<=w); }
+  function drawCrossSlab(cx,cy,L,w,zf,zb){
+    // solid extruded cross prism: front cap, back cap, and side walls, painter-sorted
+    const f=crossPoly(cx,cy,L,w,zf), b=crossPoly(cx,cy,L,w,zb), n=f.length;
+    const faces=[];
+    for(let i=0;i<n;i++){ const j=(i+1)%n; faces.push({v:[f[i],f[j],b[j],b[i]], col:"rgba(104,116,132,0.95)"}); }
+    faces.push({v:f, col:"rgba(178,191,207,0.97)"});   // front cap (toward recorder)
+    faces.push({v:b, col:"rgba(118,130,146,0.95)"});   // back cap (toward emitter)
+    faces.forEach(fc=>{ let cxx=0,cyy=0,czz=0; fc.v.forEach(p=>{cxx+=p[0];cyy+=p[1];czz+=p[2];});
+      const c=[cxx/fc.v.length,cyy/fc.v.length,czz/fc.v.length]; fc.d=dot3(sub(c,eye),fwd); });
+    faces.sort((a,b2)=>b2.d-a.d);
+    faces.forEach(fc=>poly(fc.v, fc.col, "rgba(197,206,221,0.45)", 1));
+  }
+
+  const opt={recon:true,cone:true,rays:false,grid:true,spin:true};
+  [["t-recon","recon"],["t-cone","cone"],["t-rays","rays"],["t-grid","grid"],["t-spin","spin"]].forEach(([id,key])=>{
+    document.getElementById(id).addEventListener("change",e=>opt[key]=e.target.checked); });
+
+  let dragging=false,lx=0,ly=0;
+  canvas.addEventListener("pointerdown",e=>{dragging=true;lx=e.clientX;ly=e.clientY;opt.spin=false;document.getElementById("t-spin").checked=false;canvas.setPointerCapture(e.pointerId);});
+  canvas.addEventListener("pointermove",e=>{ if(!dragging)return; az-=(e.clientX-lx)*.006; el+=(e.clientY-ly)*.006; el=Math.max(-1.45,Math.min(1.45,el)); lx=e.clientX; ly=e.clientY; });
+  canvas.addEventListener("pointerup",()=>dragging=false);
+  canvas.addEventListener("wheel",e=>{e.preventDefault(); dist=Math.max(2.8,Math.min(15,dist*(1+Math.sign(e.deltaY)*.08)));},{passive:false});
+  function resize(){ const dpr=Math.min(devicePixelRatio||1,2); W=canvas.clientWidth; H=canvas.clientHeight; canvas.width=W*dpr; canvas.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); drawProfile(); }
+  addEventListener("resize",resize);
+
+  const gx=24, gy=16; // subsampled grid dots
+  function frame(now){
+    if(opt.spin&&!reduceMotion) az+=0.0032;
+    cam(); ctx.clearRect(0,0,W,H);
+    if(!S){ requestAnimationFrame(frame); return; }
+    const t=now/1000;
+    const Lx=S.Lx, Ly=S.Ly, zObj=S.zObject, zEmit=S.zEmitter, EM=[...S.emitterXY,zEmit], REF=[...S.refXY,0];
+    const cc=S.crossCenter, L=S.armL, w=S.armW;
+    const reconZ = S.z[Math.min(zIndex,S.z.length-1)];
+
+    // scan progress
+    if(scanning){
+      const p=Math.min(1,(now-scanStart)/(scanDur*1000)); k=Math.round(p*S.total);
+      updateScanText();
+      if(now-lastReq>110){ lastReq=now; schedule("recon",true); }
+      if(p>=1){ scanning=false; k=S.total; scanBtn.textContent="Begin scan"; scanBtn.classList.remove("stop"); setParamLock(false); updateScanText(); schedule("recon",true); }
+    }
+    const frac = S.total? k/S.total : 0;
+    const row = Math.floor(frac*S.ny), col = Math.floor(frac*S.total) - row*S.nx;
+    const boundaryY = (row/S.ny)*Ly;
+
+    // planes far->near
+    const pit=[];
+    pit.push({d:dot3(sub([Lx/2,Ly/2,0],eye),fwd), fn:()=>poly([[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]],"rgba(56,225,214,0.06)","rgba(56,225,214,0.5)",1.4)});
+    pit.push({d:dot3(sub([Lx/2,Ly/2,zObj],eye),fwd), fn:()=>{ poly([[0,0,zObj],[Lx,0,zObj],[Lx,Ly,zObj],[0,Ly,zObj]],null,"rgba(154,167,187,0.14)",1);
+      const T=S.crossThickness||0;
+      if(T>0.005){ drawCrossSlab(cc[0],cc[1],L,w,zObj-T/2,zObj+T/2); }
+      else poly(crossPoly(cc[0],cc[1],L,w,zObj),"rgba(154,167,187,0.82)","#c3cedd",1.2); }});
+    if(opt.recon){ const mc={single:"56,225,214",white:"255,181,69",dark:"255,93,158"}[mode];
+      pit.push({d:dot3(sub([Lx/2,Ly/2,reconZ],eye),fwd), fn:()=>{ poly([[0,0,reconZ],[Lx,0,reconZ],[Lx,Ly,reconZ],[0,Ly,reconZ]],`rgba(${mc},0.10)`,`rgba(${mc},0.9)`,1.6);
+        lbl([0,Ly,reconZ],"recon z="+reconZ.toFixed(2),`rgb(${mc})`,6,-6); }}); }
+    pit.sort((a,b)=>b.d-a.d).forEach(it=>it.fn());
+
+    if(opt.cone) [[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]].forEach(c=>seg(EM,c,"rgba(255,181,69,0.26)",1,1));
+    if(opt.rays){ const f=(zEmit-zObj)/zEmit;
+      for(let y=0.2;y<Ly;y+=0.28)for(let x=0.2;x<Lx;x+=0.28){ const hx=EM[0]+(x-EM[0])*f,hy=EM[1]+(y-EM[1])*f;
+        const blk=inCross(hx,hy,cc[0],cc[1],L,w); seg(EM,[x,y,0],blk?"rgba(255,93,94,0.5)":"rgba(56,225,214,0.12)",blk?1.3:0.8,1); } }
+
+    const items=[];
+    if(opt.grid){ for(let iy=0;iy<gy;iy++)for(let ix=0;ix<gx;ix++){ const X=(ix+0.5)/gx*Lx, Y=(iy+0.5)/gy*Ly; const p=proj([X,Y,0]); if(!p)continue;
+      const acq = scanning ? (Y<=boundaryY) : (k>=S.total);
+      items.push({d:p.depth, fn:()=>{ const r=Math.max(1.2,9/p.depth);
+        ctx.fillStyle = acq ? "rgba(90,216,232,0.95)" : "rgba(70,90,110,0.5)";
+        if(acq){ctx.shadowColor="rgba(56,225,214,0.8)"; ctx.shadowBlur=5;}
+        ctx.beginPath(); ctx.arc(p.x,p.y,r,0,7); ctx.fill(); ctx.shadowBlur=0; }}); } }
+
+    // scanning antenna at current acquisition point
+    if(scanning || (k>0 && k<S.total)){
+      const ax=(col+0.5)/S.nx*Lx, ay=(row+0.5)/S.ny*Ly; const p=proj([ax,ay,0]);
+      if(p) items.push({d:p.depth-0.001, fn:()=>{ const halo=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,15);
+        halo.addColorStop(0,"rgba(234,242,255,0.9)"); halo.addColorStop(1,"rgba(234,242,255,0)");
+        ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(p.x,p.y,15,0,7); ctx.fill();
+        ctx.fillStyle=COL.white; ctx.beginPath(); ctx.arc(p.x,p.y,3.2,0,7); ctx.fill(); }});
+    }
+
+    { const p=proj(REF); if(p) items.push({d:p.depth-0.002, fn:()=>{ ctx.fillStyle=COL.magenta; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.fill();
+      ctx.strokeStyle="rgba(255,93,158,0.5)"; ctx.lineWidth=1.3; ctx.beginPath(); ctx.arc(p.x,p.y,8,0,7); ctx.stroke(); }}); }
+    { const p=proj(EM); if(p) items.push({d:p.depth-0.003, fn:()=>{ const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,32);
+      g.addColorStop(0,"rgba(255,181,69,0.95)"); g.addColorStop(0.3,"rgba(255,122,47,0.55)"); g.addColorStop(1,"rgba(255,122,47,0)");
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(p.x,p.y,32,0,7); ctx.fill(); ctx.fillStyle="#fff4e2"; ctx.beginPath(); ctx.arc(p.x,p.y,4.3,0,7); ctx.fill();
+      const nr=reduceMotion?1:3; for(let i=0;i<nr;i++){ const ph=reduceMotion?0.5:((t*0.6+i/nr)%1);
+        ctx.strokeStyle=`rgba(255,181,69,${0.5*(1-ph)})`; ctx.lineWidth=1.3; ctx.beginPath(); ctx.arc(p.x,p.y,6+ph*38,0,7); ctx.stroke(); } }}); }
+    items.sort((a,b)=>b.d-a.d).forEach(it=>it.fn());
+
+    lbl(EM,"router",COL.amber,12,-20); lbl([cc[0]+L,cc[1],zObj],"cross",COL.steel,10,-4); lbl(REF,"ref",COL.magenta,11,10);
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- boot ----------
+  resize();
+  requestAnimationFrame(frame);
+  fetch("/api/state").then(r=>r.json()).then(st=>{ applyState(st); k=S.total; updateScanText(); schedule("recon",true); })
+    .catch(()=>setStatus("server offline — start with  python3 run.py"));
+})();
+</script>
+</body>
+</html>
