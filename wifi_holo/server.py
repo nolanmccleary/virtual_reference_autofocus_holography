@@ -60,6 +60,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/" or u.path == "/index.html":
+            with _lock:
+                _engine.set_params(Params())   # every page load resets to paper defaults
             self._send_file(APP_HTML, "text/html; charset=utf-8")
             return
         if u.path == "/api/state":
