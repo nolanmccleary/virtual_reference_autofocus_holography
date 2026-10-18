@@ -1,0 +1,453 @@
+<style>
+  :root {
+    color-scheme: dark;
+    --bg0: #0d1420;
+    --bg1: #080b12;
+    --panel: rgba(14, 20, 32, 0.74);
+    --panel-border: rgba(120, 150, 190, 0.18);
+    --text: #c9d4e4;
+    --muted: #6b7a90;
+    --cyan: #38e1d6;
+    --cyan-dim: #2bb6cf;
+    --amber: #ffb545;
+    --amber-hot: #ff7a2f;
+    --magenta: #ff5d9e;
+    --steel: #9aa7bb;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(130% 110% at 70% 15%, var(--bg0), var(--bg1) 70%);
+    color: var(--text);
+    font-family: var(--font-sans);
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; }
+  #view { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  #view:active { cursor: grabbing; }
+  .overlay { position: fixed; pointer-events: none; }
+
+  .masthead { top: 22px; left: 24px; max-width: 390px; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--cyan); margin: 0 0 6px;
+  }
+  .masthead h1 {
+    font-size: 21px; font-weight: 650; letter-spacing: -0.01em; margin: 0;
+    text-wrap: balance; line-height: 1.15;
+  }
+  .masthead p { font-size: 12.5px; color: var(--muted); margin: 7px 0 0; line-height: 1.5; max-width: 360px; }
+
+  .panel {
+    pointer-events: auto; position: fixed;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 12px; padding: 15px 16px 16px;
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 18px 50px -20px rgba(0,0,0,0.7);
+  }
+  .panel h2 {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 11px; font-weight: 600;
+  }
+  .panel h2.mt { margin-top: 17px; }
+
+  /* reconstruction panel (top-right) */
+  .recon { top: 22px; right: 22px; width: 300px; }
+  .recon-view {
+    position: relative; width: 100%; aspect-ratio: 3 / 2;
+    border-radius: 8px; overflow: hidden; background: #05070c;
+    border: 1px solid var(--panel-border);
+  }
+  .recon-view img { width: 100%; height: 100%; display: block; }
+  .recon-view .tag {
+    position: absolute; left: 8px; top: 7px; font-family: var(--font-mono);
+    font-size: 10.5px; color: var(--text); background: rgba(5,7,12,0.6);
+    padding: 2px 7px; border-radius: 5px; letter-spacing: 0.04em;
+  }
+  .recon-view .scalebar {
+    position: absolute; right: 8px; bottom: 8px; height: 3px; background: #eaf2ff;
+    box-shadow: 0 0 0 1px rgba(5,7,12,0.5);
+  }
+  .recon-view .scalebar span {
+    position: absolute; right: 0; bottom: 6px; font-family: var(--font-mono);
+    font-size: 9.5px; color: #eaf2ff; white-space: nowrap;
+  }
+
+  .seg { display: flex; gap: 4px; margin: 12px 0 10px; }
+  .seg button {
+    flex: 1; font-family: var(--font-sans); font-size: 11.5px; color: var(--muted);
+    background: rgba(120,150,190,0.08); border: 1px solid var(--panel-border);
+    border-radius: 7px; padding: 6px 4px; cursor: pointer; transition: .15s;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button[aria-pressed="true"] {
+    color: #061018; background: var(--cyan); border-color: var(--cyan); font-weight: 600;
+  }
+  .seg button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  .depth-row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+  .depth-row .lab { font-size: 11px; color: var(--muted); font-family: var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+  .depth-row .zval { font-family: var(--font-mono); font-size: 13px; color: var(--cyan); font-variant-numeric: tabular-nums; }
+  .depth-row .zval.off { color: var(--muted); }
+
+  input[type=range] { width: 100%; accent-color: var(--cyan); cursor: pointer; margin: 2px 0 2px; }
+  input[type=range]:disabled { accent-color: var(--muted); cursor: default; opacity: .5; }
+  .ticks { position: relative; height: 13px; font-family: var(--font-mono); font-size: 9px; color: var(--muted); }
+  .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+
+  #profile { width: 100%; height: 58px; display: block; margin-top: 6px; }
+
+  .thumbs { display: flex; gap: 8px; }
+  .thumb { flex: 1; }
+  .thumb figcaption { font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); margin: 3px 0 0; text-align: center; }
+  .thumb img { width: 100%; border-radius: 5px; border: 1px solid var(--panel-border); display: block; }
+
+  .params { font-family: var(--font-mono); font-size: 11px; color: var(--muted); line-height: 1.7; font-variant-numeric: tabular-nums; }
+  .params b { color: var(--text); font-weight: 600; }
+
+  /* legend / toggles panel (bottom-left) */
+  .controls { bottom: 20px; left: 24px; width: 230px; }
+  .legend-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; padding: 2.5px 0; }
+  .swatch { width: 13px; height: 13px; border-radius: 3px; flex: none; box-shadow: 0 0 9px -1px currentColor; }
+  .legend-row .lbl { color: var(--text); }
+  .legend-row .val { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .toggle { display: flex; align-items: center; gap: 9px; font-size: 12.5px; padding: 4px 0; cursor: pointer; user-select: none; color: var(--text); }
+  .toggle input { display: none; }
+  .box { width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid var(--panel-border); flex: none; display: grid; place-items: center; transition: .15s; }
+  .box::after { content: ""; width: 7px; height: 7px; border-radius: 1.5px; background: var(--cyan); transform: scale(0); transition: transform .15s; box-shadow: 0 0 8px var(--cyan); }
+  .toggle input:checked + .box { border-color: var(--cyan); }
+  .toggle input:checked + .box::after { transform: scale(1); }
+  .toggle:focus-within .box { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  .hint { bottom: 18px; left: 50%; transform: translateX(-50%); font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .hint kbd { background: rgba(120,150,190,0.12); border: 1px solid var(--panel-border); border-radius: 4px; padding: 1px 6px; font-family: inherit; color: var(--text); }
+
+  @media (max-width: 860px) {
+    .masthead { max-width: 52%; }
+    .controls { display: none; }
+    .hint { display: none; }
+    .recon { top: auto; bottom: 14px; right: 14px; left: 14px; width: auto; }
+    .recon-view { max-width: 240px; }
+  }
+</style>
+
+<div id="stage"><canvas id="view"></canvas></div>
+
+<div class="overlay masthead">
+  <p class="eyebrow">Holography of Wi-Fi Radiation · PRL 118, 183901</p>
+  <h1>Cross scene — geometry &amp; reconstruction</h1>
+  <p>A router illuminates a metal cross; a scanning antenna maps the wave front across a 3&nbsp;&times;&nbsp;2&nbsp;m plane. Scrub depth to backpropagate through the recovered 3D field.</p>
+</div>
+
+<div class="panel recon">
+  <h2>Reconstruction</h2>
+  <div class="recon-view">
+    <img id="slice" alt="reconstructed intensity slice">
+    <div class="tag" id="slice-tag">z = 2.30 m</div>
+    <div class="scalebar" id="scalebar"><span>1 m</span></div>
+  </div>
+
+  <div class="seg" role="group" aria-label="reconstruction mode">
+    <button id="m-single" aria-pressed="true">Single f</button>
+    <button id="m-white" aria-pressed="false">White-light</button>
+    <button id="m-dark" aria-pressed="false">Dark-field</button>
+  </div>
+
+  <div class="depth-row">
+    <span class="lab">Depth z</span>
+    <span class="zval" id="zval">2.30 m</span>
+  </div>
+  <input type="range" id="depth" min="0" max="40" value="34" step="1">
+  <div class="ticks" id="ticks"></div>
+
+  <canvas id="profile"></canvas>
+
+  <h2 class="mt">Recorded hologram</h2>
+  <div class="thumbs">
+    <figure class="thumb" style="margin:0"><img id="holo-amp" alt="hologram amplitude"><figcaption>amplitude</figcaption></figure>
+    <figure class="thumb" style="margin:0"><img id="holo-phase" alt="hologram phase"><figcaption>phase</figcaption></figure>
+  </div>
+
+  <h2 class="mt">Parameters</h2>
+  <div class="params" id="params"></div>
+</div>
+
+<div class="panel controls">
+  <h2>Elements</h2>
+  <div class="legend-row"><span class="swatch" style="background:var(--amber);color:var(--amber)"></span><span class="lbl">Wi-Fi emitter</span><span class="val">z=2.30</span></div>
+  <div class="legend-row"><span class="swatch" style="background:var(--steel);color:var(--steel)"></span><span class="lbl">Cross object</span><span class="val">z=1.40</span></div>
+  <div class="legend-row"><span class="swatch" style="background:var(--cyan);color:var(--cyan)"></span><span class="lbl">Scan plane</span><span class="val">z=0.00</span></div>
+  <div class="legend-row"><span class="swatch" style="background:#eaf2ff;color:#eaf2ff"></span><span class="lbl">Scanning antenna</span></div>
+  <div class="legend-row"><span class="swatch" style="background:var(--magenta);color:var(--magenta)"></span><span class="lbl">Reference antenna</span></div>
+  <h2 class="mt">Show</h2>
+  <label class="toggle"><input type="checkbox" id="t-recon" checked><span class="box"></span>Reconstruction plane</label>
+  <label class="toggle"><input type="checkbox" id="t-cone" checked><span class="box"></span>Illumination cone</label>
+  <label class="toggle"><input type="checkbox" id="t-rays"><span class="box"></span>Shadow rays</label>
+  <label class="toggle"><input type="checkbox" id="t-grid" checked><span class="box"></span>Scan grid</label>
+  <label class="toggle"><input type="checkbox" id="t-scan" checked><span class="box"></span>Animate scan</label>
+  <label class="toggle"><input type="checkbox" id="t-spin" checked><span class="box"></span>Auto-rotate</label>
+</div>
+
+<div class="overlay hint"><kbd>drag</kbd> orbit&nbsp;&nbsp;·&nbsp;&nbsp;<kbd>scroll</kbd> zoom&nbsp;&nbsp;·&nbsp;&nbsp;<kbd>slider</kbd> depth</div>
+
+<script>
+const RECON = /*__RECON_DATA__*/ null;
+</script>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("view");
+  const ctx = canvas.getContext("2d");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const D = RECON;
+
+  // ---- scene constants from the payload (fall back to paper defaults) ----
+  const Lx = D ? D.Lx : 3.0, Ly = D ? D.Ly : 2.0;
+  const Z_OBJ = D ? D.zObject : 1.40, Z_EMIT = D ? D.zEmitter : 2.30;
+  const EM = [...(D ? D.emitterXY : [1.5, 1.0]), Z_EMIT];
+  const REF = [...(D ? D.refXY : [0.45, 0.30]), 0.0];
+  const CC = D ? D.crossCenter : [1.5, 1.0];
+  const ARM_L = D ? D.armL : 0.5, ARM_W = D ? D.armW : 0.1;
+
+  const COL = { cyan:"#38e1d6", cyanDim:"#2bb6cf", amber:"#ffb545", magenta:"#ff5d9e", steel:"#9aa7bb", white:"#eaf2ff" };
+
+  function crossPoly(z) {
+    const [cx, cy] = CC, L = ARM_L, w = ARM_W;
+    return [[cx-w,cy+L],[cx+w,cy+L],[cx+w,cy+w],[cx+L,cy+w],[cx+L,cy-w],[cx+w,cy-w],
+            [cx+w,cy-L],[cx-w,cy-L],[cx-w,cy-w],[cx-L,cy-w],[cx-L,cy+w],[cx-w,cy+w]].map(([x,y])=>[x,y,z]);
+  }
+  function inCross(x, y) {
+    const [cx, cy] = CC;
+    return (Math.abs(x-cx)<=ARM_L && Math.abs(y-cy)<=ARM_W) || (Math.abs(y-cy)<=ARM_L && Math.abs(x-cx)<=ARM_W);
+  }
+
+  // ---- camera ----
+  const target = [Lx/2, Ly/2, 1.05];
+  let az = -0.72, el = 0.34, dist = 6.8;
+  const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+  const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const crs=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const nrm=v=>{const m=Math.hypot(v[0],v[1],v[2])||1;return[v[0]/m,v[1]/m,v[2]/m];};
+  let W=0,H=0,focal=600,eye=[0,0,0],right=[1,0,0],camUp=[0,1,0],fwd=[0,0,1];
+  function updateCamera(){
+    const ce=Math.cos(el),se=Math.sin(el),ca=Math.cos(az),sa=Math.sin(az);
+    const dir=[ce*sa,se,ce*ca];
+    eye=[target[0]+dir[0]*dist,target[1]+dir[1]*dist,target[2]+dir[2]*dist];
+    fwd=nrm(sub(target,eye)); right=nrm(crs(fwd,[0,1,0])); camUp=crs(right,fwd);
+    focal=(H/2)/Math.tan((42*Math.PI/180)/2);
+  }
+  function project(p){
+    const v=sub(p,eye); const cz=dot(v,fwd); if(cz<0.05) return null;
+    return {x:W/2+dot(v,right)*focal/cz, y:H/2-dot(v,camUp)*focal/cz, depth:cz};
+  }
+  function fillPoly(pts,fill,stroke,lw){
+    const ps=pts.map(project); if(ps.some(p=>!p)) return;
+    ctx.beginPath(); ps.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.closePath();
+    if(fill){ctx.fillStyle=fill;ctx.fill();} if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=lw||1;ctx.stroke();}
+  }
+  function line(a,b,color,lw,alpha){
+    const pa=project(a),pb=project(b); if(!pa||!pb) return;
+    ctx.globalAlpha=alpha==null?1:alpha; ctx.strokeStyle=color; ctx.lineWidth=lw||1;
+    ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y); ctx.stroke(); ctx.globalAlpha=1;
+  }
+  function label(p,text,color,dx,dy){
+    const pp=project(p); if(!pp) return;
+    ctx.font="11px ui-monospace, Menlo, monospace"; ctx.fillStyle=color;
+    ctx.textAlign="left"; ctx.textBaseline="middle"; ctx.fillText(text,pp.x+(dx||8),pp.y+(dy||0));
+  }
+
+  // ---- UI state ----
+  const opt={recon:true,cone:true,rays:false,grid:true,scan:true,spin:true};
+  const bind=(id,key)=>{const e=document.getElementById(id); if(e) e.addEventListener("change",ev=>opt[key]=ev.target.checked);};
+  bind("t-recon","recon"); bind("t-cone","cone"); bind("t-rays","rays");
+  bind("t-grid","grid"); bind("t-scan","scan"); bind("t-spin","spin");
+
+  // reconstruction viewer state
+  let mode = "single";          // single | white | dark
+  let depthIdx = D ? D.iObject : 20;
+  let reconZ = D ? D.z[depthIdx] : Z_OBJ;
+  const modeColor = { single: COL.cyan, white: COL.amber, dark: COL.magenta };
+
+  const sliceImg = document.getElementById("slice");
+  const sliceTag = document.getElementById("slice-tag");
+  const zval = document.getElementById("zval");
+  const depth = document.getElementById("depth");
+  const profileCv = document.getElementById("profile");
+
+  function setMode(m){
+    mode = m;
+    document.getElementById("m-single").setAttribute("aria-pressed", m==="single");
+    document.getElementById("m-white").setAttribute("aria-pressed", m==="white");
+    document.getElementById("m-dark").setAttribute("aria-pressed", m==="dark");
+    if(m==="dark"){
+      depthIdx = D.iObject; depth.value = depthIdx; depth.disabled = true;
+    } else {
+      depth.disabled = false;
+    }
+    updateSlice(); drawProfile();
+  }
+  function updateSlice(){
+    if(!D) return;
+    reconZ = D.z[depthIdx];
+    if(mode==="dark"){
+      sliceImg.src = "data:image/png;base64," + D.darkfield;
+      sliceTag.textContent = "dark-field · z = " + Z_OBJ.toFixed(2) + " m";
+      zval.textContent = Z_OBJ.toFixed(2) + " m"; zval.classList.add("off");
+    } else {
+      sliceImg.src = "data:image/png;base64," + D.slices[mode][depthIdx];
+      const near = Math.abs(reconZ-Z_EMIT)<0.03 ? " · emitter" : (Math.abs(reconZ-Z_OBJ)<0.03 ? " · object" : "");
+      sliceTag.textContent = "z = " + reconZ.toFixed(2) + " m" + near;
+      zval.textContent = reconZ.toFixed(2) + " m"; zval.classList.remove("off");
+    }
+  }
+  function drawProfile(){
+    if(!D) return;
+    const c=profileCv, g=c.getContext("2d");
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    const w=c.clientWidth, h=c.clientHeight; c.width=w*dpr; c.height=h*dpr; g.setTransform(dpr,0,0,dpr,0,0);
+    g.clearRect(0,0,w,h);
+    const prof = mode==="dark" ? D.profile.white : D.profile[mode];
+    const n=prof.length, pad=3;
+    const X=i=> pad + i/(n-1)*(w-2*pad);
+    const Yv=v=> h-pad - v*(h-2*pad);
+    // object / emitter markers
+    const zi=(zt)=>{ let bi=0,bd=1e9; D.z.forEach((z,i)=>{const d=Math.abs(z-zt);if(d<bd){bd=d;bi=i;}}); return bi; };
+    [[zi(Z_OBJ),COL.steel],[zi(Z_EMIT),COL.amber]].forEach(([i,col])=>{
+      g.strokeStyle=col; g.globalAlpha=.4; g.lineWidth=1; g.beginPath(); g.moveTo(X(i),pad); g.lineTo(X(i),h-pad); g.stroke(); g.globalAlpha=1;
+    });
+    // curve
+    g.beginPath(); prof.forEach((v,i)=> i?g.lineTo(X(i),Yv(v)):g.moveTo(X(i),Yv(v)));
+    g.strokeStyle=COL.cyanDim; g.lineWidth=1.6; g.stroke();
+    g.lineTo(X(n-1),h-pad); g.lineTo(X(0),h-pad); g.closePath();
+    g.fillStyle="rgba(43,182,207,0.12)"; g.fill();
+    // current-depth marker
+    const cx=X(depthIdx);
+    g.strokeStyle=modeColor[mode]; g.lineWidth=1.5; g.beginPath(); g.moveTo(cx,pad); g.lineTo(cx,h-pad); g.stroke();
+    g.fillStyle=modeColor[mode]; g.beginPath(); g.arc(cx,Yv(prof[depthIdx]),3,0,7); g.fill();
+  }
+
+  if(D){
+    document.getElementById("m-single").onclick=()=>setMode("single");
+    document.getElementById("m-white").onclick=()=>setMode("white");
+    document.getElementById("m-dark").onclick=()=>setMode("dark");
+    depth.max = D.z.length-1; depth.value = depthIdx;
+    depth.addEventListener("input", e=>{ depthIdx=+e.target.value; updateSlice(); drawProfile(); });
+    document.getElementById("holo-amp").src = "data:image/png;base64," + D.hologram.amp;
+    document.getElementById("holo-phase").src = "data:image/png;base64," + D.hologram.phase;
+    // depth ticks
+    const ticks=document.getElementById("ticks");
+    const addTick=(zt,txt)=>{ let bi=0,bd=1e9; D.z.forEach((z,i)=>{const d=Math.abs(z-zt);if(d<bd){bd=d;bi=i;}});
+      const s=document.createElement("span"); s.textContent=txt; s.style.left=(bi/(D.z.length-1)*100)+"%"; ticks.appendChild(s); };
+    addTick(D.z[0], D.z[0].toFixed(1)); addTick(Z_OBJ,"obj"); addTick(Z_EMIT,"emit"); addTick(D.z[D.z.length-1], D.z[D.z.length-1].toFixed(1));
+    document.getElementById("params").innerHTML =
+      `carrier&nbsp; <b>${D.carrierGHz.toFixed(1)} GHz</b><br>`+
+      `&lambda;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <b>${D.lambdaCm.toFixed(1)} cm</b><br>`+
+      `band&nbsp;&nbsp;&nbsp;&nbsp;<b>${D.bandwidthMHz.toFixed(0)} MHz</b> &times; ${D.nFreq}<br>`+
+      `grid&nbsp;&nbsp;&nbsp;&nbsp;<b>${D.nx}&times;${D.ny}</b> px`;
+    updateSlice(); drawProfile();
+  }
+
+  // ---- scan grid ----
+  const gridStep=0.12, gridPts=[];
+  for(let y=gridStep/2;y<Ly;y+=gridStep) for(let x=gridStep/2;x<Lx;x+=gridStep) gridPts.push([x,y,0]);
+
+  // ---- interaction ----
+  let dragging=false,lastX=0,lastY=0;
+  canvas.addEventListener("pointerdown",e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;opt.spin=false;
+    const sp=document.getElementById("t-spin"); if(sp) sp.checked=false; canvas.setPointerCapture(e.pointerId);});
+  canvas.addEventListener("pointermove",e=>{ if(!dragging) return;
+    az-=(e.clientX-lastX)*0.006; el+=(e.clientY-lastY)*0.006; el=Math.max(-1.45,Math.min(1.45,el));
+    lastX=e.clientX; lastY=e.clientY; });
+  canvas.addEventListener("pointerup",()=>dragging=false);
+  canvas.addEventListener("wheel",e=>{e.preventDefault(); dist=Math.max(2.8,Math.min(15,dist*(1+Math.sign(e.deltaY)*0.08)));},{passive:false});
+
+  function resize(){
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    W=canvas.clientWidth; H=canvas.clientHeight; canvas.width=W*dpr; canvas.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+    drawProfile();
+  }
+  window.addEventListener("resize",resize);
+
+  // ---- render ----
+  let t0=performance.now();
+  function frame(now){
+    const t=(now-t0)/1000;
+    if(opt.spin&&!reduceMotion) az+=0.0032;
+    updateCamera(); ctx.clearRect(0,0,W,H);
+
+    // planes far-to-near, including the movable reconstruction plane
+    const planeItems=[];
+    planeItems.push({depth:dot(sub([Lx/2,Ly/2,0],eye),fwd), fn:()=>
+      fillPoly([[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]],"rgba(56,225,214,0.07)","rgba(56,225,214,0.55)",1.5)});
+    planeItems.push({depth:dot(sub([Lx/2,Ly/2,Z_OBJ],eye),fwd), fn:()=>{
+      fillPoly([[0,0,Z_OBJ],[Lx,0,Z_OBJ],[Lx,Ly,Z_OBJ],[0,Ly,Z_OBJ]],null,"rgba(154,167,187,0.18)",1);
+      fillPoly(crossPoly(Z_OBJ),"rgba(154,167,187,0.82)","#c3cedd",1.2);
+    }});
+    if(opt.recon && D){
+      const zc=modeColor[mode];
+      const rgba=mode==="single"?"rgba(56,225,214,":(mode==="white"?"rgba(255,181,69,":"rgba(255,93,158,");
+      planeItems.push({depth:dot(sub([Lx/2,Ly/2,reconZ],eye),fwd), fn:()=>{
+        fillPoly([[0,0,reconZ],[Lx,0,reconZ],[Lx,Ly,reconZ],[0,Ly,reconZ]], rgba+"0.10)", rgba+"0.9)", 1.6);
+        label([0,Ly,reconZ], "recon z="+reconZ.toFixed(2), zc, 6, -6);
+      }});
+    }
+    planeItems.sort((a,b)=>b.depth-a.depth).forEach(it=>it.fn());
+
+    if(opt.cone){ [[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]].forEach(c=>line(EM,c,"rgba(255,181,69,0.28)",1,1)); }
+
+    if(opt.rays){
+      const f=(Z_EMIT-Z_OBJ)/Z_EMIT;
+      for(let y=0.2;y<Ly;y+=0.28) for(let x=0.2;x<Lx;x+=0.28){
+        const end=[x,y,0]; const hx=EM[0]+(end[0]-EM[0])*f, hy=EM[1]+(end[1]-EM[1])*f;
+        const blk=inCross(hx,hy);
+        line(EM,end, blk?"rgba(255,93,94,0.55)":"rgba(56,225,214,0.14)", blk?1.3:0.8, 1);
+      }
+    }
+
+    const items=[];
+    if(opt.grid){ for(const g of gridPts){ const p=project(g); if(!p) continue;
+      items.push({depth:p.depth, fn:()=>{ const r=Math.max(1.4,10/p.depth);
+        ctx.fillStyle="rgba(90,216,232,0.9)"; ctx.shadowColor="rgba(56,225,214,0.8)"; ctx.shadowBlur=5;
+        ctx.beginPath(); ctx.arc(p.x,p.y,r,0,7); ctx.fill(); ctx.shadowBlur=0; }}); } }
+
+    if(opt.scan){
+      const ncol=Math.floor(Lx/gridStep), nrow=Math.floor(Ly/gridStep), total=ncol*nrow;
+      const idx=reduceMotion?Math.floor(total*0.4):Math.floor((t*7)%total);
+      const gx=(idx%ncol)*gridStep+gridStep/2, gy=Math.floor(idx/ncol)*gridStep+gridStep/2;
+      const pos=[gx,gy,0], p=project(pos);
+      if(p){ items.push({depth:p.depth-0.001, fn:()=>{
+        const halo=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,16);
+        halo.addColorStop(0,"rgba(234,242,255,0.9)"); halo.addColorStop(1,"rgba(234,242,255,0)");
+        ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(p.x,p.y,16,0,7); ctx.fill();
+        ctx.fillStyle=COL.white; ctx.beginPath(); ctx.arc(p.x,p.y,3.4,0,7); ctx.fill(); }});
+        label(pos,"scan",COL.white,10,-12);
+      }
+    }
+
+    { const p=project(REF); if(p) items.push({depth:p.depth-0.002, fn:()=>{
+      ctx.fillStyle=COL.magenta; ctx.beginPath(); ctx.arc(p.x,p.y,4.2,0,7); ctx.fill();
+      ctx.strokeStyle="rgba(255,93,158,0.5)"; ctx.lineWidth=1.4; ctx.beginPath(); ctx.arc(p.x,p.y,8,0,7); ctx.stroke(); }}); }
+
+    { const p=project(EM); if(p) items.push({depth:p.depth-0.003, fn:()=>{
+      const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,34);
+      g.addColorStop(0,"rgba(255,181,69,0.95)"); g.addColorStop(0.3,"rgba(255,122,47,0.55)"); g.addColorStop(1,"rgba(255,122,47,0)");
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(p.x,p.y,34,0,7); ctx.fill();
+      ctx.fillStyle="#fff4e2"; ctx.beginPath(); ctx.arc(p.x,p.y,4.5,0,7); ctx.fill();
+      const nr=reduceMotion?1:3;
+      for(let i=0;i<nr;i++){ const ph=reduceMotion?0.5:((t*0.6+i/nr)%1);
+        ctx.strokeStyle=`rgba(255,181,69,${0.5*(1-ph)})`; ctx.lineWidth=1.4;
+        ctx.beginPath(); ctx.arc(p.x,p.y,6+ph*40,0,7); ctx.stroke(); } }}); }
+
+    items.sort((a,b)=>b.depth-a.depth).forEach(it=>it.fn());
+
+    label(EM,"router",COL.amber,12,-22);
+    label([CC[0]+ARM_L,CC[1],Z_OBJ],"cross",COL.steel,10,-4);
+    label(REF,"ref",COL.magenta,11,10);
+
+    requestAnimationFrame(frame);
+  }
+  resize(); requestAnimationFrame(frame);
+})();
+</script>
