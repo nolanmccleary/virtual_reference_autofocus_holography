@@ -21,12 +21,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .engine import HoloEngine, Params
+from .engine import HoloEngine
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_HTML = os.path.join(ROOT, "viz3d", "app.html")
 
-_engine = HoloEngine(Params())
+DEFAULT_SCENE = "cross"
+_engine = HoloEngine(DEFAULT_SCENE)
 _lock = threading.Lock()
 
 
@@ -61,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/" or u.path == "/index.html":
             with _lock:
-                _engine.set_params(Params())   # every page load resets to paper defaults
+                _engine.set_scene(DEFAULT_SCENE)   # every page load resets to defaults
             self._send_file(APP_HTML, "text/html; charset=utf-8")
             return
         if u.path == "/api/state":
@@ -102,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------- POST
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path != "/api/params":
+        if u.path not in ("/api/params", "/api/scene"):
             self.send_error(404, "not found")
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -112,31 +113,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "bad json"}, code=400)
             return
         with _lock:
-            cur = _engine.p
-            g = body.get  # shorthand
-            p = Params(
-                carrier_ghz=float(g("carrier_ghz", cur.carrier_ghz)),
-                bandwidth_mhz=float(g("bandwidth_mhz", cur.bandwidth_mhz)),
-                n_freq=int(g("n_freq", cur.n_freq)),
-                nx=int(g("nx", cur.nx)),
-                plane_x_m=float(g("plane_x_m", cur.plane_x_m)),
-                plane_y_m=float(g("plane_y_m", cur.plane_y_m)),
-                point_sep_cm=float(g("point_sep_cm", cur.point_sep_cm)),
-                z_emitter_cm=float(g("z_emitter_cm", cur.z_emitter_cm)),
-                z_object_cm=float(g("z_object_cm", cur.z_object_cm)),
-                cross_arm_cm=float(g("cross_arm_cm", cur.cross_arm_cm)),
-                cross_thickness_cm=float(g("cross_thickness_cm", cur.cross_thickness_cm)),
-                emitter_x_cm=float(g("emitter_x_cm", cur.emitter_x_cm)),
-                emitter_y_cm=float(g("emitter_y_cm", cur.emitter_y_cm)),
-                cross_x_cm=float(g("cross_x_cm", cur.cross_x_cm)),
-                cross_y_cm=float(g("cross_y_cm", cur.cross_y_cm)),
-                ref_x_cm=float(g("ref_x_cm", cur.ref_x_cm)),
-                ref_y_cm=float(g("ref_y_cm", cur.ref_y_cm)),
-                multipath=bool(g("multipath", cur.multipath)),
-                wall_distance_m=float(g("wall_distance_m", cur.wall_distance_m)),
-                reflectivity=float(g("reflectivity", cur.reflectivity)),
-            )
-            _engine.set_params(p)
+            try:
+                if u.path == "/api/scene":
+                    # switch scene (optionally with initial params)
+                    _engine.set_scene(str(body.get("name", "cross")), body.get("params"))
+                else:
+                    # merge changed params into the current scene (engine filters keys)
+                    merged = dict(_engine.p)
+                    merged.update(body or {})
+                    _engine.set_params(merged)
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, code=400)
+                return
             self._send_json(_engine.state())
 
 

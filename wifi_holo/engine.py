@@ -20,57 +20,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from .forward import record_hologram, reference_value, _image_sources  # noqa: E402
 from .propagation import angular_spectrum_propagate  # noqa: E402
-from .scene import CrossScene  # noqa: E402
 from .sources import speed_of_light, wavelength_of  # noqa: E402
-
-@dataclass
-class Params:
-    carrier_ghz: float = 5.0
-    bandwidth_mhz: float = 70.0
-    n_freq: int = 32
-    # plane extent (m) and the two separate grids over it
-    plane_x_m: float = 3.0
-    plane_y_m: float = 2.0
-    nx: int = 120              # SLICE RESOLUTION: fine compute/display columns; ny derived
-    point_sep_cm: float = 2.5  # SCAN GRID: measurement-point separation (both axes)
-    z_emitter_cm: float = 230.0
-    z_object_cm: float = 140.0
-    cross_arm_cm: float = 100.0   # full arm span
-    cross_thickness_cm: float = 5.0
-    # lateral positions (cm) on / relative to the recording plane
-    emitter_x_cm: float = 150.0
-    emitter_y_cm: float = 100.0
-    cross_x_cm: float = 150.0
-    cross_y_cm: float = 100.0
-    ref_x_cm: float = 45.0
-    ref_y_cm: float = 30.0
-    multipath: bool = False
-    wall_distance_m: float = 2.5     # walls this far beyond the scene (all sides)
-    reflectivity: float = 0.5        # per-wall reflected amplitude (0 == multipath off)
-    n_depths: int = 41
-
-    def scene(self) -> CrossScene:
-        dx = self.plane_x_m / self.nx
-        return CrossScene(
-            Lx=self.plane_x_m, Ly=self.plane_y_m, dx=dx,
-            z_object=self.z_object_cm / 100.0,
-            z_emitter=self.z_emitter_cm / 100.0,
-            carrier_hz=self.carrier_ghz * 1e9,
-            bandwidth_hz=self.bandwidth_mhz * 1e6,
-            n_frequencies=int(self.n_freq),
-            cross_arm_length=self.cross_arm_cm / 100.0,
-            cross_thickness=self.cross_thickness_cm / 100.0,
-            emitter_xy=(self.emitter_x_cm / 100.0, self.emitter_y_cm / 100.0),
-            cross_center_xy=(self.cross_x_cm / 100.0, self.cross_y_cm / 100.0),
-            reference_xy=(self.ref_x_cm / 100.0, self.ref_y_cm / 100.0),
-            multipath=bool(self.multipath),
-            multipath_reflectivity=float(self.reflectivity),
-            room_margin_m=float(self.wall_distance_m),
-            room_back_m=float(self.wall_distance_m),
-            room_front_m=float(self.wall_distance_m),
-        )
+from . import scenes  # noqa: E402
 
 
 def _png_b64(norm01: np.ndarray, cmap: str) -> str:
@@ -80,56 +32,77 @@ def _png_b64(norm01: np.ndarray, cmap: str) -> str:
 
 
 class HoloEngine:
-    def __init__(self, params: Params | None = None):
-        self.set_params(params or Params())
+    """Scene-agnostic reconstruction engine.
+
+    A scene module (wifi_holo.scenes.*) provides the forward physics -- the
+    complex field per frequency at the recording plane plus geometry metadata.
+    This class owns the shared synthetic-aperture + reconstruction machinery.
+    """
+
+    def __init__(self, scene_name: str = "cross", params: dict | None = None):
+        self.set_scene(scene_name, params)
 
     # ---------------------------------------------------------------- params
-    def set_params(self, params: Params) -> None:
-        self.p = params
-        self.scene = params.scene()
-        s = self.scene
-        self.nx, self.ny = s.nx, s.ny           # fine compute grid (slice resolution)
-        self.freqs = s.frequencies()
-        self.carrier_idx = int(np.argmin(np.abs(self.freqs - s.carrier_hz)))
-        self.z_values = np.linspace(0.4, s.z_emitter + 0.3, params.n_depths)
-        self.i_object = int(np.argmin(np.abs(self.z_values - s.z_object)))
-        self.i_emitter = int(np.argmin(np.abs(self.z_values - s.z_emitter)))
+    def set_scene(self, scene_name: str, params: dict | None = None) -> None:
+        self.scene_name = scene_name
+        self.builder = scenes.get(scene_name)
+        p = dict(self.builder.defaults())
+        if params:
+            p.update({k: v for k, v in params.items() if k in p})
+        self.set_params(p)
+
+    def set_params(self, params: dict) -> None:
+        # keep only keys this scene knows; fill the rest from defaults
+        p = dict(self.builder.defaults())
+        p.update({k: v for k, v in (params or {}).items() if k in p})
+        self.p = p
+
+        b = self.builder.build(p)
+        self.built = b
+        self.nx, self.ny = b.nx, b.ny
+        self.dx, self.dy = b.dx, b.dy
+        self.Lx, self.Ly = b.Lx, b.Ly
+        self.freqs = b.freqs
+        self.carrier_idx = b.carrier_idx
+        self.z_values = b.z_values
+        self.z_emitter = b.z_emitter
 
         # ---- scan grid (measurement points) at the requested separation ----
-        sep = max(params.point_sep_cm / 100.0, s.dx)      # not finer than the compute grid
-        self.nx_pts = max(1, int(round(s.Lx / sep)))
-        self.ny_pts = max(1, int(round(s.Ly / sep)))
+        sep_cm = float(p.get("point_sep_cm", b.dx * 100.0))
+        sep = max(sep_cm / 100.0, b.dx)                   # not finer than the compute grid
+        self.nx_pts = max(1, int(round(b.Lx / sep)))
+        self.ny_pts = max(1, int(round(b.Ly / sep)))
         self.scan_total = self.nx_pts * self.ny_pts
         self.total = self.scan_total                       # progressive-scan count
-        self.sep_x_cm = s.Lx / self.nx_pts * 100.0
-        self.sep_y_cm = s.Ly / self.ny_pts * 100.0
+        self.sep_x_cm = b.Lx / self.nx_pts * 100.0
+        self.sep_y_cm = b.Ly / self.ny_pts * 100.0
 
         # map fine pixels <-> scan points (nearest), for block-fill sampling
-        dx, dy = s.dx, s.dy
-        xs = (np.arange(self.nx_pts) + 0.5) * s.Lx / self.nx_pts
-        ys = (np.arange(self.ny_pts) + 0.5) * s.Ly / self.ny_pts
+        dx, dy = b.dx, b.dy
+        xs = (np.arange(self.nx_pts) + 0.5) * b.Lx / self.nx_pts
+        ys = (np.arange(self.ny_pts) + 0.5) * b.Ly / self.ny_pts
         scanpix_col = np.clip(np.round(xs / dx - 0.5).astype(int), 0, self.nx - 1)
         scanpix_row = np.clip(np.round(ys / dy - 0.5).astype(int), 0, self.ny - 1)
         fine_x = (np.arange(self.nx) + 0.5) * dx
         fine_y = (np.arange(self.ny) + 0.5) * dy
-        owner_col = np.clip(np.round(fine_x / (s.Lx / self.nx_pts) - 0.5).astype(int), 0, self.nx_pts - 1)
-        owner_row = np.clip(np.round(fine_y / (s.Ly / self.ny_pts) - 0.5).astype(int), 0, self.ny_pts - 1)
-        self._srow = scanpix_row[owner_row]               # fine row -> sampled fine row
-        self._scol = scanpix_col[owner_col]               # fine col -> sampled fine col
-        self.owner_index = owner_row[:, None] * self.nx_pts + owner_col[None, :]  # (ny,nx)
+        owner_col = np.clip(np.round(fine_x / (b.Lx / self.nx_pts) - 0.5).astype(int), 0, self.nx_pts - 1)
+        owner_row = np.clip(np.round(fine_y / (b.Ly / self.ny_pts) - 0.5).astype(int), 0, self.ny_pts - 1)
+        self._srow = scanpix_row[owner_row]
+        self._scol = scanpix_col[owner_col]
+        self.owner_index = owner_row[:, None] * self.nx_pts + owner_col[None, :]
 
-        # cache full field (for reference) + block-filled measured field per frequency
-        Ufull = [record_hologram(s, f) for f in self.freqs]
-        rx = int(np.clip(round(s.reference_xy[0] / dx - 0.5), 0, self.nx - 1))
-        ry = int(np.clip(round(s.reference_xy[1] / dy - 0.5), 0, self.ny - 1))
-        self.ref = [complex(u[ry, rx]) or 1.0 for u in Ufull]
-        self.U = [u[np.ix_(self._srow, self._scol)] for u in Ufull]   # block-filled samples
+        # reference (homodyne denominator) + block-filled measured field per frequency
+        rx = int(np.clip(round(b.reference_xy[0] / dx - 0.5), 0, self.nx - 1))
+        ry = int(np.clip(round(b.reference_xy[1] / dy - 0.5), 0, self.ny - 1))
+        self.ref = [complex(u[ry, rx]) or 1.0 for u in b.full_fields]
+        self.U = [u[np.ix_(self._srow, self._scol)] for u in b.full_fields]
 
-        # emitter-plane window that KEEPS just the focus, to estimate the direct
-        # illumination for dark-field (forward-propagated to each depth).
-        X, Y = s.grids()
-        ex, ey = s.emitter_xy
-        sigma = s.carrier_wavelength            # ~1 wavelength around the focus
+        # emitter-plane window that KEEPS just the focus, for dark-field illumination
+        x = (np.arange(self.nx) + 0.5) * dx
+        y = (np.arange(self.ny) + 0.5) * dy
+        X, Y = np.meshgrid(x, y)
+        ex, ey = b.emitter_xy
+        sigma = b.carrier_wavelength
         self.emitter_pass = np.exp(-((X - ex) ** 2 + (Y - ey) ** 2) / (2 * sigma ** 2))
 
     # -------------------------------------------------------------- aperture
@@ -139,11 +112,10 @@ class HoloEngine:
         return (self.owner_index < k).astype(float)
 
     def _bp(self, holo: np.ndarray, z: float, wl: float) -> np.ndarray:
-        return angular_spectrum_propagate(holo, dz=-z, wavelength=wl, dx=self.scene.dx, dy=self.scene.dy)
+        return angular_spectrum_propagate(holo, dz=-z, wavelength=wl, dx=self.dx, dy=self.dy)
 
     # --------------------------------------------------------------- stacks
     def _stack(self, mode: str, k: int) -> np.ndarray:
-        s = self.scene
         mask = self._aperture(k)
         nz = len(self.z_values)
         vol = np.zeros((nz, self.ny, self.nx))
@@ -170,10 +142,10 @@ class HoloEngine:
             for fi, f in enumerate(self.freqs):
                 holo = (self.U[fi] * mask) / self.ref[fi]
                 wl = wavelength_of(f)
-                emitter_only = self._bp(holo, s.z_emitter, wl) * self.emitter_pass
+                emitter_only = self._bp(holo, self.z_emitter, wl) * self.emitter_pass
                 for i, z in enumerate(self.z_values):
                     illum = angular_spectrum_propagate(
-                        emitter_only, dz=(s.z_emitter - z), wavelength=wl, dx=s.dx, dy=s.dy)
+                        emitter_only, dz=(self.z_emitter - z), wavelength=wl, dx=self.dx, dy=self.dy)
                     illum_sum[i] += np.abs(illum) ** 2
                     direct_sum[i] += np.abs(self._bp(holo, z, wl)) ** 2
             vol = np.clip(illum_sum - direct_sum, 0.0, None)
@@ -183,7 +155,6 @@ class HoloEngine:
 
     def _recon_one(self, mode: str, z: float, k: int) -> np.ndarray:
         """Intensity at a SINGLE depth (used for fast z-scrubbing)."""
-        s = self.scene
         mask = self._aperture(k)
         if mode == "single":
             wl = wavelength_of(self.freqs[self.carrier_idx])
@@ -201,10 +172,10 @@ class HoloEngine:
             for fi, f in enumerate(self.freqs):
                 wl = wavelength_of(f)
                 holo = (self.U[fi] * mask) / self.ref[fi]
-                emitter_only = self._bp(holo, s.z_emitter, wl) * self.emitter_pass
+                emitter_only = self._bp(holo, self.z_emitter, wl) * self.emitter_pass
                 direct += np.abs(self._bp(holo, z, wl)) ** 2
                 illum += np.abs(angular_spectrum_propagate(
-                    emitter_only, dz=(s.z_emitter - z), wavelength=wl, dx=s.dx, dy=s.dy)) ** 2
+                    emitter_only, dz=(self.z_emitter - z), wavelength=wl, dx=self.dx, dy=self.dy)) ** 2
             return np.clip(illum - direct, 0.0, None)
         raise ValueError(f"unknown mode {mode!r}")
 
@@ -216,6 +187,7 @@ class HoloEngine:
         sl = (img / (img.max() or 1.0)) ** gamma
         return {"slice": _png_b64(sl, "inferno"), "z": z, "zIndex": z_index}
 
+
     # ---------------------------------------------------------------- public
     def recon(self, mode: str, z_index: int, k: int, gamma: float = 0.7) -> dict:
         vol = self._stack(mode, k)
@@ -223,9 +195,14 @@ class HoloEngine:
         # depth-focus curve uses the global max; the displayed slice is
         # normalised to ITS OWN max so every depth is vivid (as in the paper).
         prof = (vol.reshape(len(self.z_values), -1).max(axis=1) / gmax)
-        # autofocus sharpness: summed squared intensity per slice (SAR/holography)
-        sharp = (vol ** 2).reshape(len(self.z_values), -1).sum(axis=1)
+        # autofocus sharpness: summed squared intensity per slice, normalised by
+        # the slice's total energy -> ΣI² / (ΣI)² (concentration, brightness-independent)
+        flat = vol.reshape(len(self.z_values), -1)
+        sharp = (flat ** 2).sum(axis=1) / np.maximum(flat.sum(axis=1), 1e-12) ** 2
         sharp_index = int(np.argmax(sharp))
+        # lateral position of the focus in the sharpest slice (intensity centroid
+        # of the bright peak -> sub-pixel x,y of the router)
+        sharp_x, sharp_y = self._focus_xy(vol[sharp_index])
         z_index = int(np.clip(z_index, 0, len(self.z_values) - 1))
         sl = vol[z_index]
         slice01 = (sl / (sl.max() or 1.0)) ** gamma
@@ -235,9 +212,25 @@ class HoloEngine:
             "sharpness": (sharp / (sharp.max() or 1.0)).tolist(),
             "sharpIndex": sharp_index,
             "sharpZ": float(self.z_values[sharp_index]),
+            "sharpX": sharp_x,
+            "sharpY": sharp_y,
             "zIndex": z_index,
             "z": float(self.z_values[z_index]),
         }
+
+    def _focus_xy(self, img: np.ndarray) -> tuple[float, float]:
+        """Lateral (x, y) in metres of the focal peak: intensity centroid within a
+        window around the brightest pixel of the slice."""
+        iy, ix = np.unravel_index(int(np.argmax(img)), img.shape)
+        r = max(2, int(round(0.10 / self.dx)))     # ~10 cm window
+        y0, y1 = max(0, iy - r), min(self.ny, iy + r + 1)
+        x0, x1 = max(0, ix - r), min(self.nx, ix + r + 1)
+        patch = img[y0:y1, x0:x1]
+        ys, xs = np.mgrid[y0:y1, x0:x1]
+        w = patch.sum() or 1.0
+        cx = float((xs * patch).sum() / w + 0.5) * self.dx
+        cy = float((ys * patch).sum() / w + 0.5) * self.dy
+        return cx, cy
 
     def hologram_pngs(self, k: int) -> dict:
         """Masked amplitude + phase at the carrier (the wave front being recorded)."""
@@ -249,38 +242,22 @@ class HoloEngine:
         return {"amp": _png_b64(amp01, "viridis"), "phase": _png_b64(ph, "twilight")}
 
     def state(self) -> dict:
-        s = self.scene
-        return {
+        b = self.built
+        st = {
+            "scene": self.scene_name,
+            "scenes": scenes.listing(),
+            "schema": self.builder.PARAM_SCHEMA,
+            "params": dict(self.p),
             "nx": self.nx, "ny": self.ny, "total": self.total,
-            "Lx": s.Lx, "Ly": s.Ly, "dx": s.dx,
+            "Lx": b.Lx, "Ly": b.Ly, "dx": b.dx,
             "nxPts": self.nx_pts, "nyPts": self.ny_pts, "scanTotal": self.scan_total,
             "sepXcm": self.sep_x_cm, "sepYcm": self.sep_y_cm,
             "z": self.z_values.tolist(),
-            "iObject": self.i_object, "iEmitter": self.i_emitter,
-            "zObject": s.z_object, "zEmitter": s.z_emitter,
-            "emitterXY": list(s.emitter_xy), "refXY": list(s.reference_xy),
-            "crossCenter": list(s.cross_center_xy),
-            "armL": s.cross_arm_length / 2.0, "armW": s.cross_arm_width / 2.0,
-            "crossThickness": s.cross_thickness,
-            "params": {
-                "carrier_ghz": self.p.carrier_ghz, "bandwidth_mhz": self.p.bandwidth_mhz,
-                "n_freq": self.p.n_freq, "nx": self.p.nx,
-                "plane_x_m": self.p.plane_x_m, "plane_y_m": self.p.plane_y_m,
-                "point_sep_cm": self.p.point_sep_cm,
-                "z_emitter_cm": self.p.z_emitter_cm, "z_object_cm": self.p.z_object_cm,
-                "cross_arm_cm": self.p.cross_arm_cm, "cross_thickness_cm": self.p.cross_thickness_cm,
-                "emitter_x_cm": self.p.emitter_x_cm, "emitter_y_cm": self.p.emitter_y_cm,
-                "cross_x_cm": self.p.cross_x_cm, "cross_y_cm": self.p.cross_y_cm,
-                "ref_x_cm": self.p.ref_x_cm, "ref_y_cm": self.p.ref_y_cm,
-                "multipath": self.p.multipath,
-                "wall_distance_m": self.p.wall_distance_m, "reflectivity": self.p.reflectivity,
-            },
-            "lambdaCm": wavelength_of(s.carrier_hz) * 100.0,
+            "zEmitter": b.z_emitter,
+            "emitterXY": list(b.emitter_xy), "refXY": list(b.reference_xy),
+            "geometry": b.geometry,
+            "lambdaCm": b.carrier_wavelength * 100.0,
             "cLight": speed_of_light,
-            "room": {
-                "x0": -s.room_margin_m, "x1": s.Lx + s.room_margin_m,
-                "y0": -s.room_margin_m, "y1": s.Ly + s.room_margin_m,
-                "zFront": -s.room_front_m, "zBack": s.z_emitter + s.room_back_m,
-            },
-            "imageSources": [list(p) for p, _ in _image_sources(s)],
         }
+        st.update(b.scene_extra)
+        return st
