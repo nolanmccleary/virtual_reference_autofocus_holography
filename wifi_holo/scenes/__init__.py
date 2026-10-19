@@ -11,9 +11,9 @@ The HoloEngine holds the shared scan-grid + reconstruction machinery and is
 agnostic to which scene produced the fields.
 """
 
-from . import cross, room
+from . import cross, room, walk
 
-REGISTRY = {m.NAME: m for m in (cross, room)}
+REGISTRY = {m.NAME: m for m in (cross, room, walk)}
 
 
 def get(name: str):

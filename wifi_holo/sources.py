@@ -30,3 +30,19 @@ def point_source_field(
     R = np.sqrt((grid_x - ex) ** 2 + (grid_y - ey) ** 2 + (z_plane - ez) ** 2)
     k = 2.0 * np.pi / wavelength
     return np.exp(1j * k * R) / R
+
+
+def box_image_sources(emitter_xyz, box, reflectivity):
+    """First-order wall image sources of the emitter for a box room (SHARED
+    multipath machinery used by every scene). `box` = (x0, x1, y0, y1, z0, z1)
+    wall positions; returns [(mirror_position, amplitude), ...] for the 6 walls.
+    Mirroring the emitter across each wall is the method of images.
+    """
+    ex, ey, ez = emitter_xyz
+    x0, x1, y0, y1, z0, z1 = box
+    r = reflectivity
+    return [
+        ((2 * x0 - ex, ey, ez), r), ((2 * x1 - ex, ey, ez), r),
+        ((ex, 2 * y0 - ey, ez), r), ((ex, 2 * y1 - ey, ez), r),
+        ((ex, ey, 2 * z0 - ez), r), ((ex, ey, 2 * z1 - ez), r),
+    ]

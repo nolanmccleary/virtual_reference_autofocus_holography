@@ -35,14 +35,29 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # quiet
         pass
 
+    def handle_one_request(self):
+        # The browser routinely cancels in-flight requests (reload, or superseding
+        # a slow recon); the resulting write to a closed socket raises ConnectionError.
+        # That's benign -- swallow it instead of dumping a traceback per aborted request.
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+
     # -------------------------------------------------------------- helpers
+    def _write(self, body):
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True   # client went away mid-response
+
     def _send_json(self, obj, code=200):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
 
     def _send_file(self, path, ctype):
         try:
@@ -55,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
 
     # -------------------------------------------------------------------- GET
     def do_GET(self):

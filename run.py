@@ -7,11 +7,24 @@
     python3 run.py --static     # instead: build the self-contained precomputed artifact + open it
 
 The live simulator runs all physics in Python; the browser is a thin client.
+GPU acceleration (PyTorch/MPS) for the walk-scene backprojection kicks in
+automatically when the project venv (.venv, with torch installed) is present.
 """
 
-import argparse
 import os
 import sys
+
+# Re-exec under the project venv (which has torch/MPS) so `python3 run.py`
+# transparently gets GPU acceleration; harmless if no venv. Compare sys.prefix
+# (the venv dir) rather than the interpreter path -- the venv's python symlinks
+# to the same base binary, so an executable-path check would wrongly skip this.
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+_VENV = os.path.join(_ROOT, ".venv")
+_VENV_PY = os.path.join(_VENV, "bin", "python")
+if os.path.exists(_VENV_PY) and os.path.realpath(sys.prefix) != os.path.realpath(_VENV):
+    os.execv(_VENV_PY, [_VENV_PY, *sys.argv])
+
+import argparse
 import threading
 import webbrowser
 
@@ -37,6 +50,19 @@ def run_live(port: int, open_browser: bool) -> None:
     from wifi_holo.server import serve
     httpd = serve(port=port)
     url = f"http://127.0.0.1:{port}/"
+
+    # Warm up the GPU (torch/MPS) in the background so the first walk-scene
+    # reconstruction isn't blocked by Metal kernel compilation (~6 s one-off).
+    def _warmup():
+        try:
+            from wifi_holo.engine import HoloEngine, _TORCH_DEVICE
+            if _TORCH_DEVICE in ("mps", "cuda"):
+                HoloEngine("walk", {"num_samples": 80, "n_steps": 4}).recon("single", 10, 80)
+                print(f"  (GPU warmed up: {_TORCH_DEVICE})")
+        except Exception:
+            pass
+    threading.Thread(target=_warmup, daemon=True).start()
+
     print(f"Wi-Fi holography simulator running at {url}")
     print("  (Ctrl-C to stop)")
     if open_browser:

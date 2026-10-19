@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..propagation import angular_spectrum_propagate as _asp
-from ..sources import point_source_field, wavelength_of
+from ..sources import point_source_field, wavelength_of, box_image_sources
 from .base import Built, param, defaults_from_schema
 
 NAME = "room"
@@ -100,14 +100,10 @@ def build(p: dict) -> Built:
     refl = float(_g(p, "reflectivity"))
     multipath = bool(_g(p, "multipath"))
 
-    # image sources: mirror the emitter across the 4 building walls + ceiling
+    # image sources via the SHARED helper: building footprint edges + floor/ceiling
     images = []
     if multipath:
-        images = [
-            ((-ex, ey, h), refl), ((2 * Lx - ex, ey, h), refl),
-            ((ex, -ey, h), refl), ((ex, 2 * Ly - ey, h), refl),
-            ((ex, ey, -h), refl),              # reflection across the ceiling plane
-        ]
+        images = box_image_sources(emitter_xyz, (0.0, Lx, 0.0, Ly, 0.0, h), refl)
 
     x = (np.arange(nx) + 0.5) * dx
     y = (np.arange(ny) + 0.5) * dy
@@ -132,6 +128,8 @@ def build(p: dict) -> Built:
         "zEmitter": h, "emitterXYZ": [ex, ey, h],
         "refXY": list(ref_xy),
         "shelves": [list(s) for s in shelves],
+        "occluders": [{"z": s[4], "kind": "rect", "x0": s[0], "y0": s[1], "x1": s[2], "y1": s[3]}
+                      for s in shelves],
         "multipath": multipath,
     }
     return Built(

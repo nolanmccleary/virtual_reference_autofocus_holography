@@ -17,7 +17,7 @@ import numpy as np
 
 from .propagation import angular_spectrum_propagate
 from .scene import CrossScene
-from .sources import point_source_field, wavelength_of
+from .sources import point_source_field, wavelength_of, box_image_sources
 
 
 def _direct_field(scene: CrossScene, source_xyz, wavelength: float) -> np.ndarray:
@@ -45,28 +45,12 @@ def _direct_field(scene: CrossScene, source_xyz, wavelength: float) -> np.ndarra
 
 
 def _image_sources(scene: CrossScene):
-    """First-order image sources of the emitter across a simple box room.
-
-    Six walls: x=0, x=Lx, y=0, y=Ly (scan-region edges), plus a back wall behind
-    the emitter and a front wall behind the recorder. Each contributes one bounce
-    at the reflectivity amplitude. (Higher-order bounces: a possible future option.)
-    """
-    ex, ey, ez = scene.emitter_xyz
-    Lx, Ly = scene.Lx, scene.Ly
+    """Cross-scene wall image sources via the SHARED box-room helper. Walls sit
+    `room_margin_m` beyond the scan plane (and back/front beyond emitter/recorder)."""
     m = scene.room_margin_m
-    x0, x1 = -m, Lx + m          # side walls, metres beyond the scan plane
-    y0, y1 = -m, Ly + m
-    zb = scene.z_emitter + scene.room_back_m
-    zf = -scene.room_front_m
-    r = scene.multipath_reflectivity
-    return [
-        ((2 * x0 - ex, ey, ez), r),
-        ((2 * x1 - ex, ey, ez), r),
-        ((ex, 2 * y0 - ey, ez), r),
-        ((ex, 2 * y1 - ey, ez), r),
-        ((ex, ey, 2 * zb - ez), r),
-        ((ex, ey, 2 * zf - ez), r),
-    ]
+    box = (-m, scene.Lx + m, -m, scene.Ly + m,
+           -scene.room_front_m, scene.z_emitter + scene.room_back_m)
+    return box_image_sources(scene.emitter_xyz, box, scene.multipath_reflectivity)
 
 
 def record_hologram(scene: CrossScene, frequency_hz: float) -> np.ndarray:

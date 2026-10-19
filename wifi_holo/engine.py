@@ -24,6 +24,26 @@ from .propagation import angular_spectrum_propagate  # noqa: E402
 from .sources import speed_of_light, wavelength_of  # noqa: E402
 from . import scenes  # noqa: E402
 
+# Optional PyTorch backend for GPU-accelerated backprojection (ALGORITHMS.md §7).
+# Prefers Apple MPS, then CUDA, then torch-CPU; falls back to numpy if absent.
+try:
+    import os as _os
+    import torch as _torch
+    _override = _os.environ.get("PARALLAX_DEVICE", "").strip().lower()  # mps|cuda|cpu|numpy
+    if _override == "numpy":
+        _torch = None; _TORCH_DEVICE = None
+    elif _override in ("mps", "cuda", "cpu"):
+        _TORCH_DEVICE = _override
+    elif _torch.backends.mps.is_available():
+        _TORCH_DEVICE = "mps"
+    elif _torch.cuda.is_available():
+        _TORCH_DEVICE = "cuda"
+    else:
+        _TORCH_DEVICE = "cpu"
+except Exception:  # torch not installed
+    _torch = None
+    _TORCH_DEVICE = None
+
 
 def _png_b64(norm01: np.ndarray, cmap: str) -> str:
     buf = BytesIO()
@@ -56,6 +76,8 @@ class HoloEngine:
         p = dict(self.builder.defaults())
         p.update({k: v for k, v in (params or {}).items() if k in p})
         self.p = p
+        self._gen = getattr(self, "_gen", 0) + 1   # bump -> invalidates the volume cache
+        self._vol_cache = {}                        # per (mode, k) volume bins
 
         b = self.builder.build(p)
         self.built = b
@@ -66,6 +88,11 @@ class HoloEngine:
         self.carrier_idx = b.carrier_idx
         self.z_values = b.z_values
         self.z_emitter = b.z_emitter
+        self.backend = b.backend
+
+        if self.backend == "backprojection":
+            self._setup_backprojection(b)
+            return
 
         # ---- scan grid (measurement points) at the requested separation ----
         sep_cm = float(p.get("point_sep_cm", b.dx * 100.0))
@@ -105,6 +132,33 @@ class HoloEngine:
         sigma = b.carrier_wavelength
         self.emitter_pass = np.exp(-((X - ex) ** 2 + (Y - ey) ** 2) / (2 * sigma ** 2))
 
+    # --------------------------------------------------- backprojection setup
+    def _setup_backprojection(self, b) -> None:
+        self.sample_pos = b.sample_pos                 # (N, 3)
+        self.sample_val = b.sample_val                 # per-freq (N,) complex
+        self.scan_total = len(b.sample_pos)
+        self.total = self.scan_total
+        self.nx_pts, self.ny_pts = self.scan_total, 1  # readout as "N steps"
+        self.sep_x_cm = self.sep_y_cm = 0.0
+        X, Y = np.meshgrid(b.recon_x, b.recon_y)
+        self._vx, self._vy = X, Y                      # voxel grids (ny, nx)
+        # emitter position + per-sample distance, for dark-field (subtract direct)
+        self._emit = np.array([b.emitter_xy[0], b.emitter_xy[1], b.z_emitter])
+        self._samp_R = np.linalg.norm(self.sample_pos - self._emit, axis=1)
+
+        # ---- GPU tensors (torch/MPS) for the backprojection hot path ----
+        self._tt = None
+        if _torch is not None:
+            d = _TORCH_DEVICE
+            self._tt = {
+                "pos": _torch.tensor(self.sample_pos, device=d, dtype=_torch.float32),
+                "vx": _torch.tensor(X, device=d, dtype=_torch.float32),
+                "vy": _torch.tensor(Y, device=d, dtype=_torch.float32),
+                "R": _torch.tensor(self._samp_R, device=d, dtype=_torch.float32),
+                "vr": [_torch.tensor(v.real, device=d, dtype=_torch.float32) for v in self.sample_val],
+                "vi": [_torch.tensor(v.imag, device=d, dtype=_torch.float32) for v in self.sample_val],
+            }
+
     # -------------------------------------------------------------- aperture
     def _aperture(self, k: int) -> np.ndarray:
         """Fine-grid mask of scan points acquired so far (first k in raster order)."""
@@ -114,8 +168,66 @@ class HoloEngine:
     def _bp(self, holo: np.ndarray, z: float, wl: float) -> np.ndarray:
         return angular_spectrum_propagate(holo, dz=-z, wavelength=wl, dx=self.dx, dy=self.dy)
 
+    # --------------------------------------------- backprojection reconstruction
+    def _bp_intensity(self, fi: int, z: float, k: int, subtract_direct: bool = False) -> np.ndarray:
+        """Backprojected intensity |I_f(r)|² at depth z from the first k walk
+        samples (ALGORITHMS.md §7). I_f(r) = Σ_i val_i · exp(-i·kw·|r - pos_i|);
+        subtract_direct removes the known direct emitter wave first (dark-field).
+        Runs on torch/MPS when available (cos/sin, real/imag), else numpy."""
+        k = int(np.clip(k, 1, self.scan_total))
+        kw = 2.0 * np.pi / wavelength_of(self.freqs[fi])
+        if self._tt is not None:
+            return self._bp_intensity_torch(fi, float(z), k, kw, subtract_direct)
+        # ----- numpy fallback -----
+        P = self.sample_pos[:k]
+        V = self.sample_val[fi][:k].copy()
+        if subtract_direct:
+            R = self._samp_R[:k]
+            V = V - np.exp(1j * kw * R) / np.maximum(R, 1e-6)
+        dX = self._vx[None, :, :] - P[:, 0, None, None]
+        dY = self._vy[None, :, :] - P[:, 1, None, None]
+        dZ = z - P[:, 2, None, None]
+        dist = np.sqrt(dX * dX + dY * dY + dZ * dZ)
+        img = np.tensordot(V, np.exp(-1j * kw * dist), axes=([0], [0]))
+        return np.abs(img) ** 2
+
+    def _bp_intensity_torch(self, fi, z, k, kw, subtract_direct, chunk=2000):
+        """torch/MPS backprojection intensity, chunked over samples to bound memory.
+        exp(-iθ) = cosθ - i·sinθ ; Re = Σ(vr·cos+vi·sin), Im = Σ(vi·cos-vr·sin)."""
+        t = self._tt
+        vx, vy = t["vx"], t["vy"]
+        real = _torch.zeros_like(vx); imag = _torch.zeros_like(vx)
+        for s in range(0, k, chunk):
+            e = min(s + chunk, k)
+            P = t["pos"][s:e]
+            vr = t["vr"][fi][s:e].clone(); vi = t["vi"][fi][s:e].clone()
+            if subtract_direct:
+                R = t["R"][s:e].clamp_min(1e-6)
+                vr = vr - _torch.cos(kw * R) / R
+                vi = vi - _torch.sin(kw * R) / R
+            dX = vx[None] - P[:, 0, None, None]
+            dY = vy[None] - P[:, 1, None, None]
+            dZ = z - P[:, 2, None, None]
+            th = kw * _torch.sqrt(dX * dX + dY * dY + dZ * dZ)
+            c = _torch.cos(th); sn = _torch.sin(th)
+            real = real + (vr[:, None, None] * c + vi[:, None, None] * sn).sum(0)
+            imag = imag + (vi[:, None, None] * c - vr[:, None, None] * sn).sum(0)
+        return (real * real + imag * imag).cpu().numpy()
+
+    def _stack_bp(self, mode: str, k: int) -> np.ndarray:
+        nz = len(self.z_values)
+        vol = np.zeros((nz, self.ny, self.nx))
+        sub = (mode == "dark")
+        freqs = range(len(self.freqs)) if mode == "white" else [self.carrier_idx]
+        for i, z in enumerate(self.z_values):
+            for fi in freqs:
+                vol[i] += self._bp_intensity(fi, z, k, subtract_direct=sub)
+        return vol
+
     # --------------------------------------------------------------- stacks
     def _stack(self, mode: str, k: int) -> np.ndarray:
+        if self.backend == "backprojection":
+            return self._stack_bp(mode, k)
         mask = self._aperture(k)
         nz = len(self.z_values)
         vol = np.zeros((nz, self.ny, self.nx))
@@ -155,6 +267,13 @@ class HoloEngine:
 
     def _recon_one(self, mode: str, z: float, k: int) -> np.ndarray:
         """Intensity at a SINGLE depth (used for fast z-scrubbing)."""
+        if self.backend == "backprojection":
+            sub = (mode == "dark")
+            freqs = range(len(self.freqs)) if mode == "white" else [self.carrier_idx]
+            acc = np.zeros((self.ny, self.nx))
+            for fi in freqs:
+                acc += self._bp_intensity(fi, z, k, subtract_direct=sub)
+            return acc
         mask = self._aperture(k)
         if mode == "single":
             wl = wavelength_of(self.freqs[self.carrier_idx])
@@ -179,18 +298,36 @@ class HoloEngine:
             return np.clip(illum - direct, 0.0, None)
         raise ValueError(f"unknown mode {mode!r}")
 
+    def _get_vol(self, mode: str, k: int) -> np.ndarray:
+        """Reconstruction volume for (mode, k). One cache BIN PER (mode, k) so
+        switching between single/white/dark reuses each mode's result; cleared
+        only when params change (set_params bumps _gen + resets the cache)."""
+        key = (mode, int(k))
+        vol = self._vol_cache.get(key)
+        if vol is None:
+            vol = self._stack(mode, k)
+            self._vol_cache[key] = vol
+            if len(self._vol_cache) > 12:           # small LRU cap
+                self._vol_cache.pop(next(iter(self._vol_cache)))
+        return vol
+
     def slice_only(self, mode: str, z_index: int, k: int, gamma: float = 0.7) -> dict:
-        """Fast single-depth reconstruction (no profile) for z-scrubbing."""
+        """Single-depth reconstruction for z-scrubbing. Reads the cached volume
+        for (mode, k) if present (instant); otherwise computes just this depth."""
         z_index = int(np.clip(z_index, 0, len(self.z_values) - 1))
         z = float(self.z_values[z_index])
-        img = self._recon_one(mode, z, k)
+        vol = self._vol_cache.get((mode, int(k)))
+        if vol is not None:
+            img = vol[z_index]
+        else:
+            img = self._recon_one(mode, z, k)
         sl = (img / (img.max() or 1.0)) ** gamma
         return {"slice": _png_b64(sl, "inferno"), "z": z, "zIndex": z_index}
 
 
     # ---------------------------------------------------------------- public
     def recon(self, mode: str, z_index: int, k: int, gamma: float = 0.7) -> dict:
-        vol = self._stack(mode, k)
+        vol = self._get_vol(mode, k)
         gmax = vol.max() or 1.0
         # depth-focus curve uses the global max; the displayed slice is
         # normalised to ITS OWN max so every depth is vivid (as in the paper).
@@ -234,6 +371,8 @@ class HoloEngine:
 
     def hologram_pngs(self, k: int) -> dict:
         """Masked amplitude + phase at the carrier (the wave front being recorded)."""
+        if self.backend == "backprojection":
+            return {}                               # no uniform-plane hologram to show
         mask = self._aperture(k)
         holo = (self.U[self.carrier_idx] * mask) / self.ref[self.carrier_idx]
         amp = np.abs(holo)
@@ -247,6 +386,8 @@ class HoloEngine:
             "scene": self.scene_name,
             "scenes": scenes.listing(),
             "schema": self.builder.PARAM_SCHEMA,
+            "backend": self.backend,
+            "device": _TORCH_DEVICE or "numpy",
             "params": dict(self.p),
             "nx": self.nx, "ny": self.ny, "total": self.total,
             "Lx": b.Lx, "Ly": b.Ly, "dx": b.dx,

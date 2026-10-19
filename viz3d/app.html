@@ -72,6 +72,9 @@
   .lam b { color:var(--text); }
   .pgroup { margin-top:6px; }
   .pgroup .glabel { font-family:var(--font-mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:12px 0 2px; font-weight:600; }
+  select.pselect { width:100%; margin-top:3px; font-family:var(--font-sans); font-size:12px; color:var(--text);
+    background:rgba(120,150,190,.1); border:1px solid var(--panel-border); border-radius:7px; padding:5px 8px; cursor:pointer; text-transform:capitalize; }
+  select.pselect:focus-visible { outline:2px solid var(--cyan); outline-offset:2px; }
 
   .toggle { display:flex; align-items:center; gap:9px; font-size:12px; padding:3.5px 0; cursor:pointer; user-select:none; color:var(--text); }
   .toggle input { display:none; }
@@ -162,10 +165,12 @@
   <label class="toggle" style="margin-top:8px"><input type="checkbox" id="t-sharp"><span class="box" style="border-color:rgba(94,240,138,.6)"></span><span id="sharpLabel">Max sharpness</span><span class="val" id="sharpZval" style="margin-left:auto;color:#5ef08a"></span></label>
   <div id="sharpXY" style="display:none;font-family:var(--font-mono);font-size:10.5px;color:#5ef08a;margin:1px 0 0 24px"></div>
 
-  <h2 class="mt">Recorded hologram</h2>
-  <div class="thumbs">
-    <figure class="thumb"><img id="holoAmp" alt="hologram amplitude"><figcaption>amplitude</figcaption></figure>
-    <figure class="thumb"><img id="holoPhase" alt="hologram phase"><figcaption>phase</figcaption></figure>
+  <div id="holoSection">
+    <h2 class="mt">Recorded hologram</h2>
+    <div class="thumbs">
+      <figure class="thumb"><img id="holoAmp" alt="hologram amplitude"><figcaption>amplitude</figcaption></figure>
+      <figure class="thumb"><img id="holoPhase" alt="hologram phase"><figcaption>phase</figcaption></figure>
+    </div>
   </div>
 </div>
 
@@ -184,6 +189,7 @@
   let sharpIdx = null, showSharp = false, sharpX = null, sharpY = null;
   let scanning = false, scanStart = 0, scanDur = 8.0, lastReq = 0;
   let schemaByKey = {}, PCTL = {}, curScene = null;
+  let paramsDirty = false;   // backprojection scenes: params pending until Begin scan
 
   const $ = id => document.getElementById(id);
   const dot = $("statusDot"), statusText = $("statusText");
@@ -213,14 +219,25 @@
       let gr = groups.find(g=>g.name===p.group); if(!gr){ gr={name:p.group, items:[]}; groups.push(gr); } gr.items.push(p); }
     for(const gr of groups){
       const gl = document.createElement("div"); gl.className="glabel"; gl.textContent=gr.name; host.appendChild(gl);
+      PCTL["__glabel_"+gr.name]={container:gl, group:true};
       for(const p of gr.items){
         if(p.kind==="toggle"){
           const lab=document.createElement("label"); lab.className="toggle";
           const inp=document.createElement("input"); inp.type="checkbox"; inp.id="p_"+p.key;
           const bx=document.createElement("span"); bx.className="box";
           lab.appendChild(inp); lab.appendChild(bx); lab.appendChild(document.createTextNode(p.label));
-          host.appendChild(lab); PCTL[p.key]={el:inp, kind:"toggle"};
-          inp.addEventListener("change", ()=>{ if(!scanning){ clearTimeout(paramTimer); paramTimer=setTimeout(postParams,60); } });
+          host.appendChild(lab); PCTL[p.key]={el:inp, kind:"toggle", container:lab, show_if:p.show_if};
+          inp.addEventListener("change", ()=>queueParamUpdate(true));
+        } else if(p.kind==="select"){
+          const ctl=document.createElement("div"); ctl.className="ctl";
+          const row=document.createElement("div"); row.className="row";
+          const nm=document.createElement("span"); nm.className="name"; nm.textContent=p.label;
+          row.appendChild(nm); ctl.appendChild(row);
+          const sel=document.createElement("select"); sel.id="p_"+p.key; sel.className="pselect";
+          (p.options||[]).forEach(o=>{ const op=document.createElement("option"); op.value=o; op.textContent=o; sel.appendChild(op); });
+          sel.value=p.default; ctl.appendChild(sel); host.appendChild(ctl);
+          PCTL[p.key]={el:sel, kind:"select", container:ctl, show_if:p.show_if};
+          sel.addEventListener("change", ()=>{ updateParamVisibility(); queueParamUpdate(true); });
         } else {
           const ctl=document.createElement("div"); ctl.className="ctl";
           const row=document.createElement("div"); row.className="row";
@@ -230,11 +247,23 @@
           const inp=document.createElement("input"); inp.type="range"; inp.id="p_"+p.key;
           inp.min=p.min; inp.max=p.max; inp.step=p.step; inp.value=p.default;
           ctl.appendChild(row); ctl.appendChild(inp); host.appendChild(ctl);
-          PCTL[p.key]={el:inp, valEl:val, kind:"slider"};
+          PCTL[p.key]={el:inp, valEl:val, kind:"slider", container:ctl, show_if:p.show_if};
           val.textContent = fmtVal(p, p.default);
-          inp.addEventListener("input", ()=>{ liveLabel(p.key); clearTimeout(paramTimer); paramTimer=setTimeout(postParams,260); });
+          inp.addEventListener("input", ()=>{ liveLabel(p.key); queueParamUpdate(false); });
         }
       }
+    }
+    updateParamVisibility();
+  }
+  // show/hide controls whose show_if condition isn't met by the current values
+  function updateParamVisibility(){
+    for(const key in PCTL){ const c=PCTL[key];
+      if(c.group || !c.show_if) continue;
+      let ok=true;
+      for(const dk in c.show_if){ const dc=PCTL[dk]; if(!dc){ ok=false; break; }
+        const v = dc.kind==="toggle" ? dc.el.checked : dc.el.value;
+        if(String(v)!==String(c.show_if[dk])){ ok=false; break; } }
+      c.container.style.display = ok ? "" : "none";
     }
   }
   function liveLabel(key){ const c=PCTL[key]; if(!c||c.kind!=="slider") return;
@@ -242,17 +271,29 @@
     if(key==="carrier_ghz") $("lamVal").textContent = (29.9792458/(+c.el.value)).toFixed(1)+" cm";
   }
   function readParams(){ const out={};
-    for(const key in PCTL){ const c=PCTL[key];
-      out[key] = c.kind==="toggle" ? c.el.checked : +c.el.value; }
+    for(const key in PCTL){ const c=PCTL[key]; if(c.group) continue;
+      out[key] = c.kind==="toggle" ? c.el.checked : (c.kind==="select" ? c.el.value : +c.el.value); }
     return out;
   }
-  function setParamLock(dis){ for(const key in PCTL) PCTL[key].el.disabled=dis; $("speed").disabled=dis; }
+  function setParamLock(dis){ for(const key in PCTL){ const c=PCTL[key]; if(!c.group && c.el) c.el.disabled=dis; } $("speed").disabled=dis; }
   function postParams(){
     if(scanning) return;
     setStatus("recomputing…", true);
     fetch("/api/params",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(readParams())})
-      .then(r=>r.json()).then(st=>{ applyState(st); k=S.total; updateScanText(); schedule("recon",true); })
+      .then(r=>r.json()).then(st=>{ applyState(st); afterLoad(); })
       .catch(()=>setStatus("offline"));
+  }
+  // A param changed. Fast scenes recompute live; backprojection scenes (walk)
+  // hold params PENDING and never recompute until Begin scan is pressed.
+  function queueParamUpdate(fast){
+    if(scanning) return;
+    if(S && S.backend==="backprojection"){ paramsDirty=true; setStatus("params changed — press Begin scan", false); return; }
+    clearTimeout(paramTimer); paramTimer=setTimeout(postParams, fast?60:260);
+  }
+  // commit pending params to the server (rebuild) and resolve when done
+  function commitParams(){
+    return fetch("/api/params",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(readParams())})
+      .then(r=>r.json()).then(st=>{ applyState(st); paramsDirty=false; });
   }
 
   // ---------- request scheduler ----------
@@ -260,6 +301,7 @@
   function schedule(kind, hol){ if(hol) wantHol=true; if(kind==="recon") dirtyKind="recon"; dirty=true; pump(); }
   function pump(){
     if(pending || !dirty || !S) return;
+    if(S.backend==="backprojection" && k<1){ dirty=false; setStatus("ready — press Begin scan", false); return; }
     pending=true; dirty=false; const kind=dirtyKind; dirtyKind="slice"; const hol=wantHol; wantHol=false;
     setStatus(scanning ? "scanning…" : "computing…", true);
     const url = kind==="recon"
@@ -316,6 +358,20 @@
     g.fillStyle=mc; g.beginPath(); g.arc(X(zIndex),Yv(profile[zIndex]||0),3,0,7); g.fill();
   }
 
+  // after loading new state: fast scenes auto-show the full reconstruction;
+  // backprojection (walk) is expensive, so defer -> nothing computes until "Begin scan".
+  function afterLoad(){
+    if(S && S.backend==="backprojection"){
+      k=0; profile=[]; sharpIdx=null; updateScanText();
+      $("slice").src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+      $("sliceTag").textContent="press Begin scan";
+      $("sharpZval").textContent=""; $("sharpXY").style.display="none";
+      drawProfile(); setStatus("ready — press Begin scan", false);
+    } else {
+      k=S.total; updateScanText(); schedule("recon",true);
+    }
+  }
+
   // ---------- state load ----------
   function applyState(st){
     const sceneChanged = st.scene !== curScene;
@@ -325,20 +381,28 @@
       $("sceneTitle").textContent = (st.scenes.find(s=>s.name===st.scene)||{}).label || "Live simulator";
       const sel=$("scene"); if(sel.value!==st.scene) sel.value=st.scene;
       // frame the camera to the scene scale
-      const maxDim=Math.max(st.Lx, st.Ly, st.zEmitter);
-      target=[st.Lx/2, st.Ly/2, st.zEmitter*0.45]; dist=maxDim*2.2;
-      distMin=maxDim*0.35; distMax=maxDim*3.2;
+      const wd=(st.geometry&&st.geometry.walkDepth)||0;
+      const maxDim=Math.max(st.Lx, st.Ly, st.zEmitter+wd);
+      const tz = wd>0 ? (st.zEmitter-wd)/2 : st.zEmitter*0.45;
+      target=[st.Lx/2, st.Ly/2, tz]; dist=maxDim*2.2;
+      distMin=maxDim*0.35; distMax=maxDim*3.4;
       zIndex = (st.iObject!=null ? st.iObject : (st.iEmitter!=null ? st.iEmitter : Math.floor(st.z.length/2)));
     }
     if(zIndex > S.z.length-1) zIndex = Math.floor(S.z.length/2);
     $("depth").max = S.z.length-1; $("depth").value = zIndex;
-    // sync control values from server params
-    for(const key in PCTL){ const c=PCTL[key]; if(st.params[key]==null) continue;
-      if(c.kind==="toggle") c.el.checked=!!st.params[key]; else { c.el.value=st.params[key]; liveLabel(key); } }
+    // sync control values from server params ONLY on scene change -- doing it on
+    // every param update yanks the slider you're dragging (rubber-banding).
+    if(sceneChanged){
+      for(const key in PCTL){ const c=PCTL[key]; if(c.group || st.params[key]==null) continue;
+        if(c.kind==="toggle") c.el.checked=!!st.params[key]; else { c.el.value=st.params[key]; liveLabel(key); } }
+    }
+    updateParamVisibility();
     // readouts
     $("lamVal").textContent = S.lambdaCm.toFixed(1)+" cm";
-    $("ptsVal").textContent = S.nxPts+" × "+S.nyPts+" = "+S.scanTotal;
-    $("sharpLabel").textContent = (st.scene==="cross") ? "Max sharpness (router)" : "Max sharpness (emitter)";
+    $("ptsVal").textContent = (st.scene==="walk") ? (S.scanTotal+" samples") : (S.nxPts+" × "+S.nyPts+" = "+S.scanTotal);
+    $("sharpLabel").textContent = (st.scene==="room"||st.scene==="walk") ? "Max sharpness (emitter)" : "Max sharpness (router)";
+    // backprojection scenes (walk) have no recorded-plane hologram -> hide that section
+    $("holoSection").style.display = (st.backend==="backprojection") ? "none" : "";
     // depth ticks
     const ticks=$("ticks"); ticks.innerHTML="";
     const addTick=(zt,txt)=>{ let bi=0,bd=1e9; S.z.forEach((z,i)=>{const dd=Math.abs(z-zt);if(dd<bd){bd=dd;bi=i;}});
@@ -356,7 +420,7 @@
     sel.addEventListener("change", ()=>{
       setStatus("loading scene…", true);
       fetch("/api/scene",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:sel.value})})
-        .then(r=>r.json()).then(st=>{ applyState(st); k=S.total; updateScanText(); schedule("recon",true); })
+        .then(r=>r.json()).then(st=>{ applyState(st); afterLoad(); })
         .catch(()=>setStatus("offline"));
     });
   }
@@ -380,10 +444,20 @@
     $("scanText").textContent = `${k} / ${S.total} points · ${scanning?"scanning":(k>=S.total?"complete":"idle")}`;
     scanBar.style.width=(S.total?100*k/S.total:0)+"%";
   }
+  function startScan(){
+    scanning=true; scanStart=performance.now(); k=0; scanBtn.textContent="Stop"; scanBtn.classList.add("stop"); setParamLock(true); lastReq=0;
+  }
   scanBtn.onclick=()=>{
     if(!S) return;
     if(scanning){ scanning=false; k=S.total; scanBtn.textContent="Begin scan"; scanBtn.classList.remove("stop"); setParamLock(false); updateScanText(); schedule("recon",true); return; }
-    scanning=true; scanStart=performance.now(); k=0; scanBtn.textContent="Stop"; scanBtn.classList.add("stop"); setParamLock(true); lastReq=0;
+    // backprojection scenes: commit any pending param changes (rebuild) FIRST,
+    // then scan -- this is the only place a param change takes effect.
+    if(S.backend==="backprojection" && paramsDirty){
+      setStatus("applying params…", true);
+      commitParams().then(startScan).catch(()=>setStatus("offline"));
+      return;
+    }
+    startScan();
   };
 
   // ---------- 3D scene ----------
@@ -406,6 +480,12 @@
   function crossPoly(cx,cy,L,w,z){ return [[cx-w,cy+L],[cx+w,cy+L],[cx+w,cy+w],[cx+L,cy+w],[cx+L,cy-w],[cx+w,cy-w],
     [cx+w,cy-L],[cx-w,cy-L],[cx-w,cy-w],[cx-L,cy-w],[cx-L,cy+w],[cx-w,cy+w]].map(([x,y])=>[x,y,z]); }
   function inCross(x,y,cx,cy,L,w){ return (Math.abs(x-cx)<=L&&Math.abs(y-cy)<=w)||(Math.abs(y-cy)<=L&&Math.abs(x-cx)<=w); }
+  // generic occluder footprint test (shared by shadow rays across all scenes)
+  function occluderHit(o,x,y){
+    if(o.kind==="cross") return inCross(x,y,o.cx,o.cy,o.L,o.w);
+    if(o.kind==="rect")  return x>=o.x0 && x<=o.x1 && y>=o.y0 && y<=o.y1;
+    return false;
+  }
   function drawCrossSlab(cx,cy,L,w,zf,zb){
     const f=crossPoly(cx,cy,L,w,zf), b=crossPoly(cx,cy,L,w,zb), n=f.length, faces=[];
     for(let i=0;i<n;i++){ const j=(i+1)%n; faces.push({v:[f[i],f[j],b[j],b[i]], col:"rgba(104,116,132,0.95)"}); }
@@ -414,11 +494,11 @@
       fc.d=dot3(sub([cx2/fc.v.length,cy2/fc.v.length,cz2/fc.v.length],eye),fwd); });
     faces.sort((a,b2)=>b2.d-a.d); faces.forEach(fc=>poly(fc.v, fc.col, "rgba(197,206,221,0.45)", 1));
   }
-  function drawScanMesh(Lx,Ly,zTop,sx,sy){
-    const sz=(sx+sy)/2;
-    const nX=Math.max(1,Math.round(Lx/sx)), nY=Math.max(1,Math.round(Ly/sy)), nZ=Math.max(1,Math.round(zTop/sz));
-    const line=(a,b)=>Array.from({length:a+1},(_,i)=>i).filter(i=>i%Math.ceil((a)/b||1)===0||i===a);
-    const xs=line(nX,9).map(i=>i/nX*Lx), ys=line(nY,7).map(j=>j/nY*Ly), zs=line(nZ,11).map(m=>m/nZ*zTop);
+  // reconstruction-volume lattice between the recording plane and the emitter.
+  // Portable: driven only by common geometry (Lx, Ly, zEmitter) -> works for every scene.
+  function drawScanMesh(Lx,Ly,zTop){
+    const lin=(n,L)=>Array.from({length:n+1},(_,i)=>i/n*L);
+    const xs=lin(9,Lx), ys=lin(7,Ly), zs=lin(11,zTop);
     const lc="rgba(120,180,210,0.20)";
     ys.forEach(y=>zs.forEach(z=>seg([0,y,z],[Lx,y,z],lc,1,1)));
     xs.forEach(x=>zs.forEach(z=>seg([x,0,z],[x,Ly,z],lc,1,1)));
@@ -438,8 +518,24 @@
   function resize(){ const dpr=Math.min(devicePixelRatio||1,2); W=canvas.clientWidth; H=canvas.clientHeight; canvas.width=W*dpr; canvas.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); drawProfile(); }
   addEventListener("resize",resize);
 
+  // multipath wall box -- portable across any scene that exposes geo.room + geo.multipath
+  function pushMultipathWalls(pit, geo){
+    if(!(geo.multipath && geo.room)) return;
+    const R=geo.room;
+    const walls=[
+      [[R.x0,R.y0,R.zFront],[R.x0,R.y1,R.zFront],[R.x0,R.y1,R.zBack],[R.x0,R.y0,R.zBack]],
+      [[R.x1,R.y0,R.zFront],[R.x1,R.y1,R.zFront],[R.x1,R.y1,R.zBack],[R.x1,R.y0,R.zBack]],
+      [[R.x0,R.y0,R.zFront],[R.x1,R.y0,R.zFront],[R.x1,R.y0,R.zBack],[R.x0,R.y0,R.zBack]],
+      [[R.x0,R.y1,R.zFront],[R.x1,R.y1,R.zFront],[R.x1,R.y1,R.zBack],[R.x0,R.y1,R.zBack]],
+      [[R.x0,R.y0,R.zBack],[R.x1,R.y0,R.zBack],[R.x1,R.y1,R.zBack],[R.x0,R.y1,R.zBack]],
+      [[R.x0,R.y0,R.zFront],[R.x1,R.y0,R.zFront],[R.x1,R.y1,R.zFront],[R.x0,R.y1,R.zFront]]];
+    walls.forEach(q=>{ const c=[0,0,0]; q.forEach(p=>{c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];}); c[0]/=4;c[1]/=4;c[2]/=4;
+      pit.push({d:dot3(sub(c,eye),fwd), fn:()=>poly(q,"rgba(120,140,170,0.045)","rgba(130,155,195,0.30)",1)}); });
+  }
+
   // scene-specific solid objects pushed into the depth-sorted plane list
   function sceneObjects(pit, geo){
+    pushMultipathWalls(pit, geo);
     if(geo.kind==="cross"){
       const cc=geo.crossCenter, L=geo.armL, w=geo.armW, zObj=geo.zObject, Lx=geo.Lx, Ly=geo.Ly, T=geo.crossThickness||0;
       pit.push({d:dot3(sub([Lx/2,Ly/2,zObj],eye),fwd), fn:()=>{
@@ -447,17 +543,19 @@
         if(T>0.005) drawCrossSlab(cc[0],cc[1],L,w,zObj-T/2,zObj+T/2);
         else poly(crossPoly(cc[0],cc[1],L,w,zObj),"rgba(154,167,187,0.82)","#c3cedd",1.2);
         lbl([cc[0]+L,cc[1],zObj],"cross",COL.steel,10,-4); }});
-      if(geo.multipath && geo.room){ const Rm=geo.room;
-        const walls=[
-          [[Rm.x0,Rm.y0,Rm.zFront],[Rm.x0,Rm.y1,Rm.zFront],[Rm.x0,Rm.y1,Rm.zBack],[Rm.x0,Rm.y0,Rm.zBack]],
-          [[Rm.x1,Rm.y0,Rm.zFront],[Rm.x1,Rm.y1,Rm.zFront],[Rm.x1,Rm.y1,Rm.zBack],[Rm.x1,Rm.y0,Rm.zBack]],
-          [[Rm.x0,Rm.y0,Rm.zFront],[Rm.x1,Rm.y0,Rm.zFront],[Rm.x1,Rm.y0,Rm.zBack],[Rm.x0,Rm.y0,Rm.zBack]],
-          [[Rm.x0,Rm.y1,Rm.zFront],[Rm.x1,Rm.y1,Rm.zFront],[Rm.x1,Rm.y1,Rm.zBack],[Rm.x0,Rm.y1,Rm.zBack]],
-          [[Rm.x0,Rm.y0,Rm.zBack],[Rm.x1,Rm.y0,Rm.zBack],[Rm.x1,Rm.y1,Rm.zBack],[Rm.x0,Rm.y1,Rm.zBack]],
-          [[Rm.x0,Rm.y0,Rm.zFront],[Rm.x1,Rm.y0,Rm.zFront],[Rm.x1,Rm.y1,Rm.zFront],[Rm.x0,Rm.y1,Rm.zFront]]];
-        walls.forEach(q=>{ const c=[0,0,0]; q.forEach(p=>{c[0]+=p[0];c[1]+=p[1];c[2]+=p[2];}); c[0]/=4;c[1]/=4;c[2]/=4;
-          pit.push({d:dot3(sub(c,eye),fwd), fn:()=>poly(q,"rgba(120,140,170,0.045)","rgba(130,155,195,0.30)",1)}); });
-      }
+    } else if(geo.kind==="walk"){
+      const cc=geo.crossCenter, L=geo.armL, w=geo.armW, zObj=geo.zObject, Lx=geo.Lx, Ly=geo.Ly, T=geo.crossThickness||0;
+      // cross object
+      pit.push({d:dot3(sub([Lx/2,Ly/2,zObj],eye),fwd), fn:()=>{
+        if(T>0.005) drawCrossSlab(cc[0],cc[1],L,w,zObj-T/2,zObj+T/2);
+        else poly(crossPoly(cc[0],cc[1],L,w,zObj),"rgba(154,167,187,0.82)","#c3cedd",1.2);
+        lbl([cc[0]+L,cc[1],zObj],"cross",COL.steel,10,-4); }});
+      // walk mesh box (z: -walkDepth .. 0, behind the recording plane)
+      const wz=-geo.walkDepth;
+      const box=[[0,0,wz],[Lx,0,wz],[Lx,Ly,wz],[0,Ly,wz],[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]];
+      const edges=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+      pit.push({d:dot3(sub([Lx/2,Ly/2,wz/2],eye),fwd), fn:()=>{ edges.forEach(([a,b])=>seg(box[a],box[b],"rgba(185,140,255,0.28)",1,1));
+        lbl([0,Ly,wz],"walk mesh","rgb(185,140,255)",6,-4); }});
     } else if(geo.kind==="room"){
       const Lx=geo.Lx, Ly=geo.Ly, hgt=geo.height;
       // building wireframe box (z=0 ceiling .. z=height floor)
@@ -501,27 +599,53 @@
     pit.sort((a,b)=>b.d-a.d).forEach(it=>it.fn());
 
     if(opt.cone) [[0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0]].forEach(c=>seg(EM,c,"rgba(255,181,69,0.26)",1,1));
-    if(opt.mesh) drawScanMesh(Lx,Ly,zEmit,S.sepXcm/100,S.sepYcm/100);
-    if(opt.rays && geo.kind==="cross"){ const cc=geo.crossCenter,L=geo.armL,w=geo.armW,zObj=geo.zObject;
-      const f=(zEmit-zObj)/zEmit, sx=Math.ceil(nxp/22), sy=Math.ceil(nyp/16);
-      for(let iy=0;iy<nyp;iy+=sy)for(let ix=0;ix<nxp;ix+=sx){ const x=(ix+0.5)/nxp*Lx, y=(iy+0.5)/nyp*Ly;
-        const hx=EM[0]+(x-EM[0])*f,hy=EM[1]+(y-EM[1])*f; const blk=inCross(hx,hy,cc[0],cc[1],L,w);
+    if(opt.mesh) drawScanMesh(Lx,Ly,zEmit);
+    // shadow rays: emitter -> plane; blocked where the ray crosses any occluder.
+    // Generic over occluders (cross footprint / shelf rects) -> works for every scene.
+    if(opt.rays){ const occ=geo.occluders||[]; const nxr=22, nyr=16;
+      for(let iy=0;iy<nyr;iy++)for(let ix=0;ix<nxr;ix++){ const x=(ix+0.5)/nxr*Lx, y=(iy+0.5)/nyr*Ly;
+        let blk=false;
+        for(const o of occ){ const f=(zEmit-o.z)/zEmit, hx=EM[0]+(x-EM[0])*f, hy=EM[1]+(y-EM[1])*f;
+          if(occluderHit(o,hx,hy)){ blk=true; break; } }
         seg(EM,[x,y,0],blk?"rgba(255,93,94,0.5)":"rgba(56,225,214,0.12)",blk?1.3:0.8,1); } }
 
     const items=[];
-    if(opt.grid){ const sx=Math.ceil(nxp/40), sy=Math.ceil(nyp/28);
+    const isWalk = geo.kind==="walk";
+    if(opt.grid && !isWalk){ const sx=Math.ceil(nxp/40), sy=Math.ceil(nyp/28);
       for(let iy=0;iy<nyp;iy+=sy)for(let ix=0;ix<nxp;ix+=sx){ const X=(ix+0.5)/nxp*Lx, Y=(iy+0.5)/nyp*Ly; const p=proj([X,Y,0]); if(!p)continue;
         const acq = scanning ? (Y<=boundaryY) : (k>=stot);
         items.push({d:p.depth, fn:()=>{ const r=Math.max(1.1,8/p.depth);
           ctx.fillStyle=acq?"rgba(90,216,232,0.95)":"rgba(70,90,110,0.5)"; if(acq){ctx.shadowColor="rgba(56,225,214,0.8)";ctx.shadowBlur=4;}
           ctx.beginPath(); ctx.arc(p.x,p.y,r,0,7); ctx.fill(); ctx.shadowBlur=0; }}); } }
-    if(scanning || (k>0 && k<stot)){ const ax=(scol+0.5)/nxp*Lx, ay=(srow+0.5)/nyp*Ly; const p=proj([ax,ay,0]);
-      if(p) items.push({d:p.depth-0.001, fn:()=>{ const halo=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,15);
-        halo.addColorStop(0,"rgba(234,242,255,0.9)"); halo.addColorStop(1,"rgba(234,242,255,0)");
-        ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(p.x,p.y,15,0,7); ctx.fill();
-        ctx.fillStyle=COL.white; ctx.beginPath(); ctx.arc(p.x,p.y,3.2,0,7); ctx.fill(); }}); }
-    { const p=proj(REF); if(p) items.push({d:p.depth-0.002, fn:()=>{ ctx.fillStyle=COL.magenta; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.fill();
-      ctx.strokeStyle="rgba(255,93,158,0.5)"; ctx.lineWidth=1.3; ctx.beginPath(); ctx.arc(p.x,p.y,8,0,7); ctx.stroke(); }}); }
+    if(isWalk){
+      // the walk itself IS the scan: draw the acquired scan-antenna path + current pose
+      const SP=geo.scanPath, N=SP.length, kacq=Math.min(N, Math.max(0, k||(k>=stot?N:0)));
+      // scan-antenna trail (acquired bright cyan, remaining dim)
+      for(let i=1;i<N;i++){ const a=SP[i-1], b=SP[i]; const acq=i<=kacq;
+        seg(a,b, acq?"rgba(90,216,232,0.8)":"rgba(70,90,110,0.35)", acq?1.5:1, 1); }
+      // acquired sample dots
+      const stepDot=Math.ceil(N/60);
+      for(let i=0;i<kacq;i+=stepDot){ const p=proj(SP[i]); if(!p) continue;
+        items.push({d:p.depth, fn:()=>{ ctx.fillStyle="rgba(90,216,232,0.85)"; ctx.beginPath(); ctx.arc(p.x,p.y,1.6,0,7); ctx.fill(); }}); }
+      // current scan antenna + ref antenna (at the current/last acquired step)
+      const ci=Math.min(N-1, Math.max(0, (kacq>0?kacq-1:0)));
+      const sp=proj(SP[ci]), rp=proj(geo.refPath[ci]), op=proj(geo.objPath[ci]);
+      if(op) items.push({d:op.depth-0.0005, fn:()=>{ ctx.strokeStyle="rgba(234,242,255,0.5)"; ctx.lineWidth=1; const s2=proj(SP[ci]),r2=proj(geo.refPath[ci]);
+        if(s2){ctx.beginPath();ctx.moveTo(op.x,op.y);ctx.lineTo(s2.x,s2.y);ctx.stroke();} if(r2){ctx.beginPath();ctx.moveTo(op.x,op.y);ctx.lineTo(r2.x,r2.y);ctx.stroke();}
+        ctx.fillStyle="rgba(234,242,255,0.85)"; ctx.beginPath(); ctx.arc(op.x,op.y,3,0,7); ctx.fill(); }});
+      if(sp) items.push({d:sp.depth-0.001, fn:()=>{ const h=ctx.createRadialGradient(sp.x,sp.y,0,sp.x,sp.y,13);
+        h.addColorStop(0,"rgba(234,242,255,0.9)"); h.addColorStop(1,"rgba(234,242,255,0)"); ctx.fillStyle=h; ctx.beginPath(); ctx.arc(sp.x,sp.y,13,0,7); ctx.fill();
+        ctx.fillStyle=COL.white; ctx.beginPath(); ctx.arc(sp.x,sp.y,3,0,7); ctx.fill(); }});
+      if(rp) items.push({d:rp.depth-0.001, fn:()=>{ ctx.fillStyle=COL.magenta; ctx.beginPath(); ctx.arc(rp.x,rp.y,3.5,0,7); ctx.fill();
+        ctx.strokeStyle="rgba(255,93,158,0.5)"; ctx.lineWidth=1.2; ctx.beginPath(); ctx.arc(rp.x,rp.y,7,0,7); ctx.stroke(); }});
+    } else {
+      if(scanning || (k>0 && k<stot)){ const ax=(scol+0.5)/nxp*Lx, ay=(srow+0.5)/nyp*Ly; const p=proj([ax,ay,0]);
+        if(p) items.push({d:p.depth-0.001, fn:()=>{ const halo=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,15);
+          halo.addColorStop(0,"rgba(234,242,255,0.9)"); halo.addColorStop(1,"rgba(234,242,255,0)");
+          ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(p.x,p.y,15,0,7); ctx.fill();
+          ctx.fillStyle=COL.white; ctx.beginPath(); ctx.arc(p.x,p.y,3.2,0,7); ctx.fill(); }}); }
+      const p=proj(REF); if(p) items.push({d:p.depth-0.002, fn:()=>{ ctx.fillStyle=COL.magenta; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.fill();
+        ctx.strokeStyle="rgba(255,93,158,0.5)"; ctx.lineWidth=1.3; ctx.beginPath(); ctx.arc(p.x,p.y,8,0,7); ctx.stroke(); }}); }
     { const p=proj(EM); if(p){ const rad=Math.max(16,32*(6.8/Math.max(dist,1))); items.push({d:p.depth-0.003, fn:()=>{ const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,rad);
       g.addColorStop(0,"rgba(255,181,69,0.95)"); g.addColorStop(0.3,"rgba(255,122,47,0.55)"); g.addColorStop(1,"rgba(255,122,47,0)");
       ctx.fillStyle=g; ctx.beginPath(); ctx.arc(p.x,p.y,rad,0,7); ctx.fill(); ctx.fillStyle="#fff4e2"; ctx.beginPath(); ctx.arc(p.x,p.y,4.3,0,7); ctx.fill();
@@ -534,14 +658,14 @@
         ctx.beginPath(); ctx.moveTo(p.x-7,p.y); ctx.lineTo(p.x+7,p.y); ctx.moveTo(p.x,p.y-7); ctx.lineTo(p.x,p.y+7); ctx.stroke();
         ctx.beginPath(); ctx.arc(p.x,p.y,4,0,7); ctx.stroke(); } }
     lbl(EM, geo.kind==="room"?"emitter":"router", COL.amber, 12, -20);
-    lbl(REF,"ref",COL.magenta,11,10);
+    if(geo.kind!=="walk") lbl(REF,"ref",COL.magenta,11,10);
     requestAnimationFrame(frame);
   }
 
   // ---------- boot ----------
   resize();
   requestAnimationFrame(frame);
-  fetch("/api/state").then(r=>r.json()).then(st=>{ populateScenes(st.scenes); applyState(st); k=S.total; updateScanText(); schedule("recon",true); })
+  fetch("/api/state").then(r=>r.json()).then(st=>{ populateScenes(st.scenes); applyState(st); afterLoad(); })
     .catch(()=>setStatus("server offline — start with  python3 run.py"));
 })();
 </script>

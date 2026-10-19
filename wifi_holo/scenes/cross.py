@@ -78,6 +78,9 @@ def build(p: dict) -> Built:
         "crossCenter": list(s.cross_center_xy),
         "armL": s.cross_arm_length / 2.0, "armW": s.cross_arm_width / 2.0,
         "crossThickness": s.cross_thickness,
+        "occluders": [{"z": s.z_object, "kind": "cross",
+                       "cx": s.cross_center_xy[0], "cy": s.cross_center_xy[1],
+                       "L": s.cross_arm_length / 2.0, "w": s.cross_arm_width / 2.0}],
         "multipath": bool(s.multipath),
         "room": {
             "x0": -s.room_margin_m, "x1": s.Lx + s.room_margin_m,
